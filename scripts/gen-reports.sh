@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Runs Mojang's data generator on the vanilla server jar and stores the
+# protocol-relevant reports under data/<version>/. Needs java (nix develop).
+#   scripts/gen-reports.sh 26.3
+set -euo pipefail
+
+version="${1:?usage: $0 <minecraft-version>}"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+meta="$(curl -fsS https://piston-meta.mojang.com/mc/game/version_manifest_v2.json |
+  jq -r --arg v "$version" '.versions[] | select(.id == $v) | .url')"
+[ -n "$meta" ] || { echo "unknown version $version" >&2; exit 1; }
+curl -fsS -o "$work/server.jar" "$(curl -fsS "$meta" | jq -r .downloads.server.url)"
+
+(cd "$work" && java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar --reports --output gen >/dev/null)
+
+mkdir -p "$root/data/$version"
+cp "$work/gen/reports/packets.json" "$root/data/$version/"
+unzip -p "$work/server.jar" version.json | jq '{id, protocol_version, world_version, java_version}'

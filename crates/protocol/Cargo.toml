@@ -1,0 +1,10 @@
+[package]
+name = "ferrocraft-protocol"
+description = "Wire types and packets of the Minecraft Java Edition protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+uuid.workspace = true
