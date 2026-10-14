@@ -1,8 +1,11 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use ferrocraft::{Config, Server};
 use tokio::net::TcpListener;
+use tokio::signal::unix::SignalKind;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -23,12 +26,16 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding {}", config.bind))?;
 
-    let server = Server::new(config);
+    let server = Server::new(config)?;
+    let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
     tokio::select! {
-        result = server.serve(listener) => result,
-        _ = tokio::signal::ctrl_c() => {
-            info!("shutting down");
-            Ok(())
-        }
+        result = Arc::clone(&server).serve(listener) => return result,
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
     }
+    info!("shutting down");
+    server.shutdown().await;
+    // Give the connections a moment to deliver their disconnect message.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    Ok(())
 }

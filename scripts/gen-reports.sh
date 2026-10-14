@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Runs Mojang's data generator on the vanilla server jar and stores the
-# protocol-relevant reports under data/<version>/. Needs java (nix develop).
+# protocol-relevant reports under data/<version>/: packet ids, synchronized
+# registries, tags, blocks, items, loot tables and recipes. What no report
+# contains (light, hardness, collision of blocks) comes from
+# scripts/BlockPhysics.java, run against the same jar. Needs java, jq and cargo
+# (nix develop).
 #   scripts/gen-reports.sh 26.3
 set -euo pipefail
 
@@ -14,8 +18,12 @@ meta="$(curl -fsS https://piston-meta.mojang.com/mc/game/version_manifest_v2.jso
 [ -n "$meta" ] || { echo "unknown version $version" >&2; exit 1; }
 curl -fsS -o "$work/server.jar" "$(curl -fsS "$meta" | jq -r .downloads.server.url)"
 
-(cd "$work" && java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar --reports --output gen >/dev/null)
+(cd "$work" && java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar --reports --server --output gen >/dev/null)
+# The bundler has unpacked the server and its libraries next to the jar.
+classpath="$(find "$work/versions" "$work/libraries" -name '*.jar' | tr '\n' ':')"
+(cd "$work" && java -cp "$classpath" "$root/scripts/BlockPhysics.java" gen/block_physics.json >/dev/null)
 
 mkdir -p "$root/data/$version"
 cp "$work/gen/reports/packets.json" "$root/data/$version/"
+(cd "$root" && cargo run -q --release -p ferrocraft-devtools --bin gen-data -- "$work/gen" "data/$version")
 unzip -p "$work/server.jar" version.json | jq '{id, protocol_version, world_version, java_version}'

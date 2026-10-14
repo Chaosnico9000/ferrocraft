@@ -4,11 +4,15 @@
 //! see `scripts/gen-reports.sh`), field layouts from the packet codecs in the
 //! vanilla server jar.
 
+pub mod chunk;
 pub mod codec;
+pub mod crypt;
 pub mod frame;
+pub mod nbt;
 pub mod packets;
 
 pub use codec::{Decode, Encode, Error, VarInt};
+pub use nbt::Nbt;
 
 /// The game version this crate speaks.
 pub const GAME_VERSION: &str = "26.3";

@@ -99,6 +99,38 @@ impl Decode for VarInt {
     }
 }
 
+/// A signed 64-bit integer in the same encoding as [`VarInt`], 1 to 10 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VarLong(pub i64);
+
+impl Encode for VarLong {
+    fn encode(&self, out: &mut Vec<u8>) {
+        let mut value = self.0 as u64;
+        loop {
+            if value & !0x7f == 0 {
+                out.push(value as u8);
+                return;
+            }
+            out.push((value & 0x7f) as u8 | 0x80);
+            value >>= 7;
+        }
+    }
+}
+
+impl Decode for VarLong {
+    fn decode(buf: &mut &[u8]) -> Result<Self> {
+        let mut value: u64 = 0;
+        for i in 0..10 {
+            let byte = u8::decode(buf)?;
+            value |= u64::from(byte & 0x7f) << (7 * i);
+            if byte & 0x80 == 0 {
+                return Ok(VarLong(value as i64));
+            }
+        }
+        Err(Error::VarIntTooLong)
+    }
+}
+
 macro_rules! big_endian {
     ($($t:ty),*) => {$(
         impl Encode for $t {
@@ -191,6 +223,148 @@ pub fn decode_string(buf: &mut &[u8], max_chars: usize) -> Result<String> {
     Ok(s.to_owned())
 }
 
+/// A list on the wire: `VarInt count` followed by the elements.
+impl<T: Encode> Encode for [T] {
+    fn encode(&self, out: &mut Vec<u8>) {
+        VarInt(self.len() as i32).encode(out);
+        for item in self {
+            item.encode(out);
+        }
+    }
+}
+
+impl<T: Encode> Encode for Vec<T> {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.as_slice().encode(out);
+    }
+}
+
+/// A list without a cap of its own: every element takes at least one byte, so
+/// the count cannot exceed what is left of the packet.
+impl<T: Decode> Decode for Vec<T> {
+    fn decode(buf: &mut &[u8]) -> Result<Self> {
+        let max = buf.len();
+        decode_list(buf, max)
+    }
+}
+
+/// Reads a list of at most `max` elements, the cap vanilla's `ByteBufCodecs.list(max)` sets.
+pub fn decode_list<T: Decode>(buf: &mut &[u8], max: usize) -> Result<Vec<T>> {
+    let len = decode_count(buf, max)?;
+    (0..len).map(|_| T::decode(buf)).collect()
+}
+
+/// Reads a `VarInt` element count and checks it against `max`.
+pub fn decode_count(buf: &mut &[u8], max: usize) -> Result<usize> {
+    let len = VarInt::decode(buf)?.0;
+    let len = usize::try_from(len).map_err(|_| Error::Invalid("negative element count"))?;
+    if len > max {
+        return Err(Error::Invalid("too many elements"));
+    }
+    Ok(len)
+}
+
+/// `Optional<T>` on the wire: a bool, then the value if it is present.
+impl<T: Encode> Encode for Option<T> {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.is_some().encode(out);
+        if let Some(value) = self {
+            value.encode(out);
+        }
+    }
+}
+
+impl<T: Decode> Decode for Option<T> {
+    fn decode(buf: &mut &[u8]) -> Result<Self> {
+        if bool::decode(buf)? {
+            T::decode(buf).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// A block position packed into one long: 26 bits x, 26 bits z, 12 bits y
+/// (`BlockPos.asLong`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlockPos {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+impl Encode for BlockPos {
+    fn encode(&self, out: &mut Vec<u8>) {
+        let packed = (i64::from(self.x) & 0x3ff_ffff) << 38
+            | (i64::from(self.z) & 0x3ff_ffff) << 12
+            | i64::from(self.y) & 0xfff;
+        packed.encode(out);
+    }
+}
+
+impl Decode for BlockPos {
+    fn decode(buf: &mut &[u8]) -> Result<Self> {
+        let packed = i64::decode(buf)?;
+        // Arithmetic shifts sign-extend each field.
+        Ok(Self {
+            x: (packed >> 38) as i32,
+            y: (packed << 52 >> 52) as i32,
+            z: (packed << 26 >> 38) as i32,
+        })
+    }
+}
+
+/// Fixed-size arrays, such as a position or a rotation, have no length prefix.
+macro_rules! fixed_array {
+    ($($t:ty; $n:literal),*) => {$(
+        impl Encode for [$t; $n] {
+            fn encode(&self, out: &mut Vec<u8>) {
+                self.iter().for_each(|v| v.encode(out));
+            }
+        }
+
+        impl Decode for [$t; $n] {
+            fn decode(buf: &mut &[u8]) -> Result<Self> {
+                let mut array = [<$t>::default(); $n];
+                for v in &mut array {
+                    *v = <$t>::decode(buf)?;
+                }
+                Ok(array)
+            }
+        }
+    )*};
+}
+
+fixed_array!(f64; 3, f32; 3, f32; 2, i16; 3, u8; 3);
+
+/// A byte array field with a `VarInt` length (`FriendlyByteBuf.writeByteArray`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ByteArray(pub Vec<u8>);
+
+impl Encode for ByteArray {
+    fn encode(&self, out: &mut Vec<u8>) {
+        encode_byte_array(&self.0, out);
+    }
+}
+
+impl Decode for ByteArray {
+    fn decode(buf: &mut &[u8]) -> Result<Self> {
+        let max = buf.len();
+        decode_byte_array(buf, max).map(Self)
+    }
+}
+
+/// Byte array with a `VarInt` length prefix (`FriendlyByteBuf.writeByteArray`).
+pub fn encode_byte_array(bytes: &[u8], out: &mut Vec<u8>) {
+    VarInt(bytes.len() as i32).encode(out);
+    out.extend_from_slice(bytes);
+}
+
+pub fn decode_byte_array(buf: &mut &[u8], max: usize) -> Result<Vec<u8>> {
+    let len = decode_count(buf, max)?;
+    Ok(take(buf, len)?.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +402,27 @@ mod tests {
     }
 
     #[test]
+    fn varlong_matches_reference_encodings() {
+        for (value, bytes) in [
+            (0i64, &[0x00][..]),
+            (4253, &[0x9d, 0x21]),
+            (
+                i64::MAX,
+                &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+            ),
+            (
+                -1,
+                &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01],
+            ),
+        ] {
+            let mut out = Vec::new();
+            VarLong(value).encode(&mut out);
+            assert_eq!(out, bytes, "{value}");
+            assert_eq!(VarLong::decode(&mut &bytes[..]).unwrap(), VarLong(value));
+        }
+    }
+
+    #[test]
     fn varint_partial_and_overlong() {
         assert_eq!(VarInt::decode_partial(&[0x80]).unwrap(), None);
         assert_eq!(VarInt::decode_partial(&[]).unwrap(), None);
@@ -244,6 +439,36 @@ mod tests {
         roundtrip(true);
         roundtrip(String::from("Grüße, Welt ⛏"));
         roundtrip(Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef));
+        roundtrip(Some(7i32));
+        roundtrip(None::<i32>);
+        roundtrip(BlockPos {
+            x: -30_000_000,
+            y: -64,
+            z: 29_999_999,
+        });
+    }
+
+    #[test]
+    fn block_pos_matches_vanilla_capture() {
+        // set_default_spawn_position of a vanilla superflat world: (0, -60, 0).
+        let mut out = Vec::new();
+        BlockPos { x: 0, y: -60, z: 0 }.encode(&mut out);
+        assert_eq!(i64::from_be_bytes(out.try_into().unwrap()), 0xfc4);
+    }
+
+    #[test]
+    fn list_has_varint_count_and_cap() {
+        let mut out = Vec::new();
+        vec![1u8, 2, 3].encode(&mut out);
+        assert_eq!(out, [3, 1, 2, 3]);
+        assert_eq!(
+            decode_list::<u8>(&mut out.as_slice(), 3).unwrap(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            decode_list::<u8>(&mut out.as_slice(), 2),
+            Err(Error::Invalid("too many elements"))
+        );
     }
 
     #[test]

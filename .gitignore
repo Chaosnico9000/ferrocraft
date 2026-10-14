@@ -2,3 +2,4 @@
 .direnv/
 /ferrocraft.toml
 *.log
+/world/

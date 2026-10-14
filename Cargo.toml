@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/protocol", "crates/server"]
+members = ["crates/devtools", "crates/protocol", "crates/server"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,13 +9,21 @@ license = "MIT"
 
 [workspace.dependencies]
 ferrocraft-protocol = { path = "crates/protocol" }
+aes = "0.8"
+aws-lc-rs = "1.18"
 anyhow = "1"
+cfb8 = "0.8"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 md-5 = "0.10"
+num-bigint = "0.4"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha1 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "io-util", "signal", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "io-util", "signal", "sync", "time"] }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = "1"
+uuid = { version = "1", features = ["v4"] }
