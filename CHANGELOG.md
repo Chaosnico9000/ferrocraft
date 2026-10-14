@@ -33,6 +33,11 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
 - Licht wird bei jeder Blockänderung neu berechnet, Fackeln leuchten, Dächer
   werfen Schatten.
 - `level.dat` mit Spawn, Weltzeit und Seed; Tag und Nacht laufen weiter.
+- Bots mit Rollen (`--roles`): Läufer springen, schleichen und wechseln ihre
+  Items, Baumeister bauen Türme aus wechselnden Blöcken mit Fackel und reißen
+  sie wieder ab, Hausmeister benutzen Kiste, Tür und Hebel, Werfer werfen Items
+  und sammeln sie ein. Alle sagen ab und zu etwas im Chat.
+- `OFFENE-PUNKTE.md`: was noch fehlt, und der Plan für Fabric- und Forge-Mods.
 
 ### Geändert
 

@@ -19,7 +19,7 @@ geschrieben: keine Vanilla-Klassen, kein JVM-Wrapper.
 | Block-Entities | Kisten, Fässer, Spender, Trichter, Shulker-Kisten, Endertruhe, Werkbank (Rezepte von Vanilla), Schilder beschreiben | ✅ |
 | Befehle | `/list`, `/gamemode`, `/time`, `/tp`, `/give`, `/kill` (die letzten für Operatoren) | ✅ |
 | Welt | Speichern im Vanilla-Format samt `level.dat`, Vanilla-Welten laden | ✅ |
-| Fehlt | Mobs, Öfen und Braustände, Redstone, Wasser und Lava fließen, Verzauberungen, Explosionen | ⏳ |
+| Fehlt | Mobs, Öfen und Braustände, Redstone, Wasser und Lava fließen, Verzauberungen, Explosionen; alles in [`OFFENE-PUNKTE.md`](OFFENE-PUNKTE.md), auch die geplante Schicht für Fabric- und Forge-Mods | ⏳ |
 
 Wer sich verbindet, steht in einer endlosen Superflat-Welt (Grundgestein, zwei
 Lagen Erde, Gras), im Überlebensmodus oder in dem Modus aus `game_mode`, sieht
@@ -74,8 +74,11 @@ erscheint alle 30 s mit `RUST_LOG=ferrocraft::tick=debug`.
 # komprimierte Pakete entpackt. Der Server dahinter muss offline laufen.
 cargo run -p ferrocraft-devtools --bin proxy -- 127.0.0.1:25570 127.0.0.1:25565 --log pakete.jsonl
 
-# Bots, die im Kreis um den Spawn laufen (nur Offline-Server)
-cargo run -p ferrocraft-devtools --bin bot -- 127.0.0.1:25565 --count 3 --radius 4
+# Bots (nur Offline-Server, zum Bauen im Kreativmodus). Rollen reihum:
+# walk (läuft, springt, schleicht), build (baut Türme und reißt sie ab),
+# house (Kiste, Tür, Hebel), throw (wirft Items und sammelt sie ein)
+cargo run -p ferrocraft-devtools --bin bot -- 127.0.0.1:25565 --count 8 --radius 4
+cargo run -p ferrocraft-devtools --bin bot -- 127.0.0.1:25565 --roles build,walk
 
 # Daten für eine Version neu erzeugen (Paket-IDs, Registries, Tags, Blöcke,
 # Items, Rezepte, Loot-Tabellen). Braucht Java: Mojangs Datengenerator und

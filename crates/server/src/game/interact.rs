@@ -628,6 +628,9 @@ impl Game {
     /// becomes single. Returns the positions that changed.
     pub(super) fn break_block(&mut self, pos: BlockPos, breaker: Option<i32>) -> Vec<BlockPos> {
         let removed = self.removal(pos);
+        if removed[0].1 == self.air {
+            return vec![pos];
+        }
         let mut contents = Vec::new();
         let mut chest = None;
         for &(at, state) in &removed {
