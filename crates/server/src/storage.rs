@@ -124,7 +124,7 @@ impl Storage {
             encoded.push((*pos, nbt));
         }
         let path = self.region_path(region);
-        write_atomically(&path, &region_file(&encoded)?)
+        write_atomically(&path, &region_file(&encoded)?, false)
     }
 
     fn player_path(&self, uuid: Uuid) -> PathBuf {
@@ -132,7 +132,15 @@ impl Storage {
     }
 
     pub fn load_player(&self, uuid: Uuid, data: &GameData) -> anyhow::Result<Option<PlayerData>> {
-        Ok(read_nbt_file(&self.player_path(uuid))?.map(|nbt| PlayerData::from_nbt(&nbt, data)))
+        // `PlayerDataStorage.load`: a broken file is not the player's fault;
+        // they start anew rather than being kept out.
+        match read_nbt_file(&self.player_path(uuid)) {
+            Ok(nbt) => Ok(nbt.map(|nbt| PlayerData::from_nbt(&nbt, data))),
+            Err(err) => {
+                warn!(%uuid, "failed to load player data, starting anew: {err:#}");
+                Ok(None)
+            }
+        }
     }
 
     pub fn save_player(
@@ -152,16 +160,45 @@ impl Storage {
 
 /// A gzipped NBT file as vanilla writes them; `None` if it does not exist.
 pub fn read_nbt_file(path: &Path) -> anyhow::Result<Option<Nbt>> {
+    match read_nbt_only(path) {
+        Ok(nbt @ Some(_)) => Ok(nbt),
+        // `NbtIo.readCompressed` callers fall back to the copy from before
+        // the last save, as vanilla's `_old` files are meant for.
+        result => {
+            let backup = backup_path(path);
+            match read_nbt_only(&backup) {
+                Ok(Some(nbt)) => {
+                    if let Err(err) = &result {
+                        warn!("{err:#}; using {}", backup.display());
+                    }
+                    Ok(Some(nbt))
+                }
+                _ => result,
+            }
+        }
+    }
+}
+
+fn read_nbt_only(path: &Path) -> anyhow::Result<Option<Nbt>> {
     let compressed = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
     };
     let mut bytes = Vec::new();
-    GzDecoder::new(compressed.as_slice()).read_to_end(&mut bytes)?;
+    GzDecoder::new(compressed.as_slice())
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("unpacking {}", path.display()))?;
     let (_, nbt) = Nbt::read_named(&mut bytes.as_slice())
         .with_context(|| format!("parsing {}", path.display()))?;
     Ok(Some(nbt))
+}
+
+/// `level.dat` → `level.dat_old`, as vanilla names its backups.
+fn backup_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push("_old");
+    path.with_file_name(name)
 }
 
 pub fn write_nbt_file(path: &Path, nbt: &Nbt) -> anyhow::Result<()> {
@@ -172,7 +209,7 @@ pub fn write_nbt_file(path: &Path, nbt: &Nbt) -> anyhow::Result<()> {
     nbt.write_named("", &mut bytes);
     let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
     gzip.write_all(&bytes)?;
-    write_atomically(path, &gzip.finish()?)
+    write_atomically(path, &gzip.finish()?, true)
 }
 
 /// Region coordinates of a chunk.
@@ -188,11 +225,30 @@ fn parse_region_name(path: &Path) -> Option<(i32, i32)> {
     parts.next().is_none().then_some((x, z))
 }
 
-/// Replaces a file without leaving a half-written one behind.
-fn write_atomically(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+/// Replaces a file without leaving a half-written one behind, even if the
+/// machine goes down right after (`Util.safeReplaceFile`): the new content
+/// is on disk before it takes the old one's name. With `keep_backup`, the
+/// old one stays as `<name>_old`.
+fn write_atomically(path: &Path, bytes: &[u8], keep_backup: bool) -> anyhow::Result<()> {
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+    let mut file =
+        std::fs::File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    drop(file);
+    if keep_backup && path.exists() {
+        std::fs::rename(path, backup_path(path))
+            .with_context(|| format!("backing up {}", path.display()))?;
+    }
+    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+    // The renames themselves live in the directory.
+    if let Some(dir) = path.parent()
+        && let Ok(dir) = std::fs::File::open(dir)
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
 }
 
 /// The uncompressed NBT of every chunk in a region file
@@ -883,6 +939,23 @@ mod tests {
             *state = (i % 300) as u32;
         }
         states
+    }
+
+    #[test]
+    fn broken_files_fall_back_to_the_backup() {
+        let dir = std::env::temp_dir().join(format!("ferrocraft-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("level.dat");
+        let first = Nbt::Compound(vec![("a".into(), Nbt::Int(1))]);
+        let second = Nbt::Compound(vec![("a".into(), Nbt::Int(2))]);
+        write_nbt_file(&path, &first).unwrap();
+        write_nbt_file(&path, &second).unwrap();
+        assert_eq!(read_nbt_file(&path).unwrap(), Some(second));
+        assert!(dir.join("level.dat_old").exists());
+        // A crash left the newest file empty: the one before counts.
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(read_nbt_file(&path).unwrap(), Some(first));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

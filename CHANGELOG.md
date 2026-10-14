@@ -51,6 +51,15 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
   und sammeln sie ein. Alle sagen ab und zu etwas im Chat.
 - `OFFENE-PUNKTE.md`: was noch fehlt, und der Plan für Fabric- und Forge-Mods.
 
+### Behoben
+
+- Wird die Maschine beim Speichern hart abgeschaltet, bleibt keine leere
+  Spielerdatei mehr zurück, mit der der Spieler nicht mehr hereinkam: Dateien
+  werden vor dem Umbenennen auf die Platte geschrieben (`fsync`), die vorige
+  Fassung bleibt wie bei Vanilla als `…_old` liegen und wird gelesen, wenn die
+  neue kaputt ist. Eine unlesbare Spielerdatei verhindert den Beitritt nicht
+  mehr.
+
 ### Geändert
 
 - RSA beim Login über aws-lc-rs (zeitkonstant) statt des `rsa`-Crates mit

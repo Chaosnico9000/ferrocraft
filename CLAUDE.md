@@ -120,3 +120,7 @@ Minecraft-Server (Java Edition 26.3) in Rust. Was er kann und der Aufbau stehen 
 - **Entity-Größen, Reichweiten und Attribute** liest `scripts/EntityInfo.java`
   aus dem Jar (`entities.json`); Loot-Tabellen heißen in `loot_tables.json`
   wie bei Vanilla `minecraft:blocks/…` und `minecraft:entities/…`.
+- **Umbenennen allein ist nicht absturzsicher**: ohne `fsync` vor dem
+  `rename` kann nach einem harten Neustart (WSL!) eine leere Datei unter dem
+  richtigen Namen liegen. `write_atomically` synchronisiert und behält
+  `…_old`.
