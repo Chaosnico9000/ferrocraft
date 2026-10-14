@@ -2,8 +2,9 @@
 # Runs Mojang's data generator on the vanilla server jar and stores the
 # protocol-relevant reports under data/<version>/: packet ids, synchronized
 # registries, tags, blocks, items, loot tables and recipes. What no report
-# contains (light, hardness, collision of blocks) comes from
-# scripts/BlockPhysics.java, run against the same jar. Needs java, jq and cargo
+# contains (light, hardness, collision of blocks; size and attributes of
+# entities) comes from scripts/BlockPhysics.java and scripts/EntityInfo.java,
+# run against the same jar. Needs java, jq and cargo
 # (nix develop).
 #   scripts/gen-reports.sh 26.3
 set -euo pipefail
@@ -22,6 +23,7 @@ curl -fsS -o "$work/server.jar" "$(curl -fsS "$meta" | jq -r .downloads.server.u
 # The bundler has unpacked the server and its libraries next to the jar.
 classpath="$(find "$work/versions" "$work/libraries" -name '*.jar' | tr '\n' ':')"
 (cd "$work" && java -cp "$classpath" "$root/scripts/BlockPhysics.java" gen/block_physics.json >/dev/null)
+(cd "$work" && java -cp "$classpath" "$root/scripts/EntityInfo.java" gen/entity_info.json >/dev/null)
 
 mkdir -p "$root/data/$version"
 cp "$work/gen/reports/packets.json" "$root/data/$version/"

@@ -43,6 +43,8 @@ pub fn test_config() -> Config {
         world: String::new(),
         online_mode: false,
         game_mode: "creative".into(),
+        // Tests that want animals spawn them themselves.
+        animals: false,
         ..Config::default()
     }
 }

@@ -1,5 +1,6 @@
-//! What a broken block drops: vanilla's block loot tables
-//! (`data/minecraft/loot_table/blocks`), evaluated like `LootTable.getRandomItems`.
+//! What a broken block or a killed mob drops: vanilla's loot tables
+//! (`data/minecraft/loot_table/blocks` and `entities`), evaluated like
+//! `LootTable.getRandomItems`.
 //! Enchantments and explosions do not exist here, so silk touch never
 //! applies, fortune is level 0 and everything survives.
 
@@ -76,9 +77,17 @@ enum Predicate {
         offset_z: i32,
         predicate: LocationPredicate,
     },
-    /// Block tables only ask whether there is a breaker at all.
+    /// What an entity of the context is like: whether there is one at all,
+    /// a sheep's colour, flags such as burning.
     #[serde(rename = "minecraft:entity_properties")]
-    EntityProperties,
+    EntityProperties {
+        #[serde(default)]
+        entity: String,
+        #[serde(default)]
+        predicate: Value,
+    },
+    #[serde(rename = "minecraft:killed_by_player")]
+    KilledByPlayer,
     #[serde(other)]
     Unknown,
 }
@@ -216,6 +225,14 @@ enum Entry {
         children: Vec<Entry>,
         condition: Option<Condition>,
     },
+    /// The drops of another table, e.g. a sheep's wool by colour.
+    #[serde(rename = "minecraft:loot_table")]
+    Reference {
+        value: String,
+        condition: Option<Condition>,
+        #[serde(default = "one")]
+        weight: u32,
+    },
     /// Contents of a block entity, such as a decorated pot's sherds.
     #[serde(other)]
     Unsupported,
@@ -242,39 +259,79 @@ struct Table {
     modifier: OneOrMany<Function>,
 }
 
+/// The tables by name (`minecraft:blocks/stone`, `minecraft:entities/cow`).
 #[derive(Debug, Default)]
 pub struct LootTables {
-    blocks: HashMap<String, Table>,
+    tables: HashMap<String, Table>,
     predicates: HashMap<String, Condition>,
 }
 
 #[derive(Deserialize)]
 struct Raw {
-    blocks: HashMap<String, Table>,
+    tables: HashMap<String, Table>,
     predicates: HashMap<String, Condition>,
 }
+
+/// What an entity is like, for `entity_properties`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EntityFacts<'a> {
+    pub sheep_color: Option<&'a str>,
+    pub sheared: bool,
+    pub baby: bool,
+}
+
+/// What an entry stands for once its conditions hold.
+enum Candidate<'e> {
+    Item(&'e str, &'e OneOrMany<Function>),
+    Table(&'e str),
+}
+
+/// Tables that name each other stop after this many steps.
+const MAX_DEPTH: u32 = 8;
 
 impl LootTables {
     /// Parses `loot_tables.json`.
     pub fn load(json: &str) -> anyhow::Result<Self> {
         let raw: Raw = serde_json::from_str(json).context("parsing loot_tables.json")?;
         Ok(Self {
-            blocks: raw.blocks,
+            tables: raw.tables,
             predicates: raw.predicates,
         })
     }
 }
 
+/// The table a block drops from (`BlockBehaviour.getLootTable`).
+pub fn block_table(block: &Block) -> String {
+    format!(
+        "minecraft:blocks/{}",
+        block.name.trim_start_matches("minecraft:")
+    )
+}
+
+/// The table an entity type drops from.
+pub fn entity_table(entity_type: &str) -> String {
+    format!(
+        "minecraft:entities/{}",
+        entity_type.trim_start_matches("minecraft:")
+    )
+}
+
 /// What the drops depend on.
 pub struct Context<'a> {
     pub data: &'a GameData,
+    /// The table to roll, e.g. from [`block_table`].
+    pub table: String,
+    /// The broken block's state, air for an entity.
     pub state: u32,
-    pub block: &'a Block,
     pub pos: BlockPos,
-    /// What the breaker holds.
+    /// What the breaker or killer holds.
     pub tool: Option<&'a ItemStack>,
     /// The world, for `location_check`.
     pub block_at: &'a dyn Fn(BlockPos) -> u32,
+    /// The killed entity.
+    pub entity: Option<EntityFacts<'a>>,
+    /// A player broke the block or killed the entity.
+    pub by_player: bool,
 }
 
 impl Context<'_> {
@@ -295,7 +352,11 @@ impl Context<'_> {
             Condition::Inline(predicate) => predicate,
         };
         match &**predicate {
-            Predicate::SurvivesExplosion | Predicate::EntityProperties => true,
+            Predicate::SurvivesExplosion => true,
+            Predicate::KilledByPlayer => self.by_player,
+            Predicate::EntityProperties { entity, predicate } => {
+                self.entity_matches(entity, predicate)
+            }
             Predicate::MatchBlock(block) => self.matches(block, self.state),
             Predicate::AnyOf { terms } => terms.iter().any(|t| self.holds(t, rng)),
             Predicate::AllOf { terms } => terms.iter().all(|t| self.holds(t, rng)),
@@ -343,6 +404,51 @@ impl Context<'_> {
                     _ => false,
                 }
             })
+    }
+
+    /// `EntityPredicate` for the parts loot tables use. Other checks, such as
+    /// enchantments on the attacker's weapon, never hold here.
+    fn entity_matches(&self, entity: &str, predicate: &Value) -> bool {
+        let facts = match entity {
+            "this" => self.entity,
+            // The player behind it: nothing about it is ever asked but its
+            // existence and its gear.
+            _ if self.by_player => Some(EntityFacts::default()),
+            _ => None,
+        };
+        let Some(facts) = facts else {
+            return false;
+        };
+        let Value::Object(checks) = predicate else {
+            return predicate.is_null();
+        };
+        checks.iter().all(|(key, wanted)| match key.as_str() {
+            "minecraft:flags" => wanted.as_object().is_some_and(|flags| {
+                flags.iter().all(|(flag, value)| {
+                    let actual = match flag.as_str() {
+                        "is_baby" => facts.baby,
+                        // Nothing burns, sneaks, sprints, swims or flies here.
+                        _ => false,
+                    };
+                    value.as_bool() == Some(actual)
+                })
+            }),
+            "minecraft:components" => wanted.as_object().is_some_and(|components| {
+                components
+                    .iter()
+                    .all(|(component, value)| match component.as_str() {
+                        "minecraft:sheep/color" => value.as_str() == facts.sheep_color,
+                        _ => false,
+                    })
+            }),
+            "minecraft:type_specific/sheep" => {
+                facts.sheep_color.is_some()
+                    && wanted["sheared"]
+                        .as_bool()
+                        .is_none_or(|s| s == facts.sheared)
+            }
+            _ => false,
+        })
     }
 
     fn tool_matches(&self, predicate: &ToolPredicate) -> bool {
@@ -403,11 +509,7 @@ impl Context<'_> {
 
     /// `LootPoolEntryContainer.expand`: the items an entry stands for, if its
     /// conditions hold.
-    fn expand<'e>(
-        &self,
-        entry: &'e Entry,
-        rng: &mut impl Rng,
-    ) -> Option<(&'e str, &'e OneOrMany<Function>, u32)> {
+    fn expand<'e>(&self, entry: &'e Entry, rng: &mut impl Rng) -> Option<(Candidate<'e>, u32)> {
         match entry {
             Entry::Item {
                 name,
@@ -416,7 +518,14 @@ impl Context<'_> {
                 weight,
             } => self
                 .test(condition.as_ref(), rng)
-                .then_some((name.as_str(), modifier, *weight)),
+                .then_some((Candidate::Item(name, modifier), *weight)),
+            Entry::Reference {
+                value,
+                condition,
+                weight,
+            } => self
+                .test(condition.as_ref(), rng)
+                .then_some((Candidate::Table(value), *weight)),
             Entry::Alternatives {
                 children,
                 condition,
@@ -430,12 +539,17 @@ impl Context<'_> {
         }
     }
 
-    /// The drops of the block, at most a stack each.
+    /// The drops, at most a stack each.
     pub fn drops(&self, rng: &mut impl Rng) -> Vec<ItemStack> {
-        let Some(table) = self.data.loot.blocks.get(&self.block.name) else {
-            return Vec::new();
-        };
         let mut drops = Vec::new();
+        self.roll(&self.table, rng, MAX_DEPTH, &mut drops);
+        drops
+    }
+
+    fn roll(&self, name: &str, rng: &mut impl Rng, depth: u32, drops: &mut Vec<ItemStack>) {
+        let Some(table) = self.data.loot.tables.get(name).filter(|_| depth > 0) else {
+            return;
+        };
         for pool in &table.pools {
             if !self.test(pool.condition.as_ref(), rng) {
                 continue;
@@ -446,26 +560,33 @@ impl Context<'_> {
                     .iter()
                     .filter_map(|e| self.expand(e, rng))
                     .collect();
-                let total: u32 = candidates.iter().map(|c| c.2).sum();
+                let total: u32 = candidates.iter().map(|c| c.1).sum();
                 if total == 0 {
                     continue;
                 }
                 let mut pick = rng.random_range(0..total);
-                let Some(&(name, modifier, _)) = candidates.iter().find(|c| {
-                    if pick < c.2 {
+                let Some((candidate, _)) = candidates.iter().find(|c| {
+                    if pick < c.1 {
                         true
                     } else {
-                        pick -= c.2;
+                        pick -= c.1;
                         false
                     }
                 }) else {
                     continue;
                 };
+                let (item, modifier) = match candidate {
+                    Candidate::Table(other) => {
+                        self.roll(other, rng, depth - 1, drops);
+                        continue;
+                    }
+                    Candidate::Item(item, modifier) => (item, modifier),
+                };
                 let mut count = 1;
                 self.apply(modifier, &mut count, rng);
                 self.apply(&pool.modifier, &mut count, rng);
                 self.apply(&table.modifier, &mut count, rng);
-                let Some(item) = self.data.item_id(name) else {
+                let Some(item) = self.data.item_id(item) else {
                     continue;
                 };
                 let max = self.data.item(item).map_or(64, |i| i.stack.max(1));
@@ -480,7 +601,6 @@ impl Context<'_> {
                 }
             }
         }
-        drops
     }
 }
 
@@ -500,11 +620,13 @@ mod tests {
         let air = data.default_state("minecraft:air").unwrap();
         let context = Context {
             data,
+            table: block_table(data.block_of(state).unwrap().1),
             state,
-            block: data.block_of(state).unwrap().1,
             pos: BlockPos { x: 0, y: 0, z: 0 },
             tool: tool.as_ref(),
             block_at: &|_| air,
+            entity: None,
+            by_player: true,
         };
         let mut rng = StdRng::seed_from_u64(7);
         context
@@ -561,5 +683,56 @@ mod tests {
         let dust = drops(&data, state("minecraft:glowstone"), None);
         assert_eq!(dust[0].0, "minecraft:glowstone_dust");
         assert!((2..=4).contains(&dust[0].1));
+    }
+
+    #[test]
+    fn animals_drop_like_vanilla() {
+        let data = GameData::load().unwrap();
+        let air = data.default_state("minecraft:air").unwrap();
+        let roll = |entity: &str, facts: EntityFacts, seed| {
+            let context = Context {
+                data: &data,
+                table: entity_table(entity),
+                state: air,
+                pos: BlockPos { x: 0, y: 0, z: 0 },
+                tool: None,
+                block_at: &|_| air,
+                entity: Some(facts),
+                by_player: true,
+            };
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut names: Vec<(String, i32)> = context
+                .drops(&mut rng)
+                .into_iter()
+                .map(|s| (data.item(s.item).unwrap().name.clone(), s.count))
+                .collect();
+            names.sort();
+            names
+        };
+        for seed in 0..20 {
+            // A cow: one to three raw beef, never cooked; up to two leather.
+            let cow = roll("minecraft:cow", EntityFacts::default(), seed);
+            let beef = cow.iter().find(|(n, _)| n == "minecraft:beef").unwrap();
+            assert!((1..=3).contains(&beef.1));
+            assert!(
+                cow.iter()
+                    .all(|(n, _)| n == "minecraft:beef" || n == "minecraft:leather")
+            );
+        }
+        // A white sheep with wool drops white wool, a sheared one none.
+        let woolly = EntityFacts {
+            sheep_color: Some("white"),
+            ..EntityFacts::default()
+        };
+        assert!(roll("minecraft:sheep", woolly, 1).contains(&("minecraft:white_wool".into(), 1)));
+        let sheared = EntityFacts {
+            sheared: true,
+            ..woolly
+        };
+        assert!(
+            roll("minecraft:sheep", sheared, 1)
+                .iter()
+                .all(|(n, _)| n == "minecraft:mutton")
+        );
     }
 }

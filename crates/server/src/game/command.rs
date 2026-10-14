@@ -138,6 +138,14 @@ pub fn tree(data: &GameData, permission: u8) -> Commands {
 
         let victims = t.entities("targets", false, true, Vec::new());
         root.push(t.literal("kill", true, vec![victims]));
+
+        // `ResourceArgument` over `minecraft:entity_type`.
+        let registry = "minecraft:entity_type";
+        let mut properties = Vec::new();
+        ferrocraft_protocol::codec::Encode::encode(registry, &mut properties);
+        let at = t.argument("pos", "minecraft:vec3", Vec::new(), true, Vec::new());
+        let entity = t.argument("entity", "minecraft:resource", properties, true, vec![at]);
+        root.push(t.literal("summon", false, vec![entity]));
     }
     let root = t.add(NodeKind::Root, false, root);
     Commands {
@@ -251,6 +259,7 @@ impl Game {
             ["time", rest @ ..] => self.time_command(rest),
             ["tp" | "teleport", rest @ ..] => self.tp_command(sender, rest),
             ["give", target, item, rest @ ..] => self.give_command(sender, target, item, rest),
+            ["summon", entity, rest @ ..] => self.summon_command(sender, entity, rest),
             ["kill", rest @ ..] => {
                 let victims = match rest {
                     [] => vec![sender],
@@ -431,6 +440,43 @@ impl Game {
             self.teleport(mover, destination);
         }
         Ok(reply)
+    }
+
+    /// `/summon <entity> [x y z]`, for the animals Ferrocraft knows.
+    fn summon_command(&mut self, sender: i32, entity: &str, rest: &[&str]) -> Reply {
+        let name = if entity.contains(':') {
+            entity.to_owned()
+        } else {
+            format!("minecraft:{entity}")
+        };
+        let Some(kind) = super::mob::Kind::from_name(&name) else {
+            return Err(error("commands.summon.failed", Vec::new()));
+        };
+        let base = self.players.get(&sender).map(|p| p.pos).unwrap_or_default();
+        let pos = match rest {
+            [] => base,
+            [x, y, z] => {
+                let at = [
+                    parse_coordinate(x, base[0], true),
+                    parse_coordinate(y, base[1], false),
+                    parse_coordinate(z, base[2], true),
+                ];
+                let [Some(x), Some(y), Some(z)] = at else {
+                    return Err(error("argument.pos3d.incomplete", Vec::new()));
+                };
+                [x, y, z]
+            }
+            _ => return Err(error("command.unknown.argument", Vec::new())),
+        };
+        if self.spawn_mob(kind, pos).is_none() {
+            return Err(error("commands.summon.failed", Vec::new()));
+        }
+        let key = format!("entity.{}", name.replace(':', "."));
+        Ok(text::translate(
+            "commands.summon.success",
+            vec![text::translate(&key, Vec::new(), None)],
+            None,
+        ))
     }
 
     fn give_command(&mut self, sender: i32, target: &str, item: &str, rest: &[&str]) -> Reply {

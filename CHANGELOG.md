@@ -7,6 +7,18 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
 
 ### Neu
 
+- Tiere: Kühe, Schweine, Schafe und Hühner spawnen in Herden auf Gras um die
+  Spieler, laufen umher, schauen Spieler an, folgen jemandem mit ihrem Futter
+  in der Hand und rennen weg, wenn man sie schlägt. Sie geben, was Vanillas
+  Loot-Tabellen sagen (Rindfleisch, Leder, Wolle in der Farbe des Schafs …).
+  Schafe lassen sich scheren, Kühe melken, Hühner legen Eier, und alle machen
+  ihre Geräusche. `animals = false` schaltet sie ab.
+- Nahkampf gegen Tiere und andere Spieler (im Überlebensmodus): Schaden nach
+  Waffe und Aufladung, kritische Treffer im Fallen, Rückstoß, Sprint-Schläge,
+  Abnutzung der Waffe, Todesmeldung „von Spieler erschlagen“.
+- `/summon` für Kühe, Schweine, Schafe und Hühner.
+- Werkzeuge nutzen sich um ihren `damage_per_block` ab, zerbrechen mit Geräusch,
+  und Schwerter bauen im Kreativmodus keine Blöcke ab.
 - Überlebensmodus: Abbauen dauert so lange wie bei Vanilla (Härte, Werkzeug,
   unter Wasser, in der Luft), andere sehen die Risse. Blöcke lassen fallen,
   was Vanillas Loot-Tabellen sagen (Gras gibt Erde, Stein ohne Spitzhacke

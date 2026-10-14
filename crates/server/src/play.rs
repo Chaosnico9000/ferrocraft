@@ -12,17 +12,18 @@ use ferrocraft_protocol::frame::RawPacket;
 use ferrocraft_protocol::packets::Packet;
 use ferrocraft_protocol::packets::login::GameProfile;
 use ferrocraft_protocol::packets::play::{
-    AcceptTeleportation, AddEntity, BlockChangedAck, BlockUpdate, BundleDelimiter,
+    AcceptTeleportation, AddEntity, Attack, BlockChangedAck, BlockUpdate, BundleDelimiter,
     CLIENT_COMMAND_RESPAWN, ChangeGameMode, Chat, ChatCommand, ChunkBatchFinished,
     ChunkBatchReceived, ChunkBatchStart, ClientCommand, ClientInformation, ClientTickEnd,
     ClientboundKeepAlive, ContainerClick, ContainerSetContent, Disconnect, EntityData,
     EntityDataValue, EntityDataValues, EntityEvent, EntityIds, ForgetLevelChunk, GameEvent,
-    GameEventKind, GameMode, Login, LpVec3, MovePlayer, PERMISSION_LEVEL_EVENT, PickItemFromBlock,
-    PlayerAction, PlayerCommand, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate, PlayerInput,
-    PlayerLoaded, PlayerPosition, Punch, RemoveEntities, Respawn, ServerboundContainerClose,
-    ServerboundKeepAlive, ServerboundPlayerAbilities, SetCarriedItem, SetChunkCacheCenter,
-    SetCreativeModeSlot, SetDefaultSpawnPosition, SetEntityData, SetEquipment, SetHeldSlot,
-    SignUpdate, Slot, Slots, SpawnInfo, UseItem, UseItemOn, data_index, player_command,
+    GameEventKind, GameMode, Interact, Login, LpVec3, MovePlayer, PERMISSION_LEVEL_EVENT,
+    PickItemFromBlock, PlayerAction, PlayerCommand, PlayerInfoEntry, PlayerInfoRemove,
+    PlayerInfoUpdate, PlayerInput, PlayerLoaded, PlayerPosition, Punch, RemoveEntities, Respawn,
+    ServerboundContainerClose, ServerboundKeepAlive, ServerboundPlayerAbilities, SetCarriedItem,
+    SetChunkCacheCenter, SetCreativeModeSlot, SetDefaultSpawnPosition, SetEntityData, SetEquipment,
+    SetHeldSlot, SignUpdate, Slot, Slots, SpawnInfo, UseItem, UseItemOn, data_index,
+    player_command,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tracing::debug;
@@ -515,6 +516,18 @@ impl Session<'_> {
                     entity_id,
                     hand: use_item.hand,
                     sequence: use_item.sequence,
+                });
+            }
+            Attack::ID => {
+                let target = Attack::from_raw(raw)?.entity_id;
+                self.event(Event::Attack { entity_id, target });
+            }
+            Interact::ID => {
+                let interact = Interact::from_raw(raw)?;
+                self.event(Event::Interact {
+                    entity_id,
+                    target: interact.entity_id,
+                    hand: interact.hand,
                 });
             }
             ClientCommand::ID => {

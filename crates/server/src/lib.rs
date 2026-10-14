@@ -132,6 +132,7 @@ impl Server {
             storage: storage.clone(),
             level: level.clone(),
             entity_ids: Arc::clone(&next_entity_id),
+            animals: config.animals,
         });
         Ok(Arc::new(Self {
             config,

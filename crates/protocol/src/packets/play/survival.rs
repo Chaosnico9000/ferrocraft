@@ -172,3 +172,37 @@ impl Decode for DamageEvent {
         })
     }
 }
+
+packet! {
+    /// `minecraft:attack`, serverbound: a left click on an entity.
+    Attack = 0x01 {
+        entity_id: i32 as varint,
+    }
+}
+
+packet! {
+    /// `minecraft:interact`, serverbound: a right click on an entity, e.g.
+    /// shears on a sheep. `location` is where on it, relative to its feet.
+    Interact = 0x1a {
+        entity_id: i32 as varint,
+        /// 0 main hand, 1 off hand.
+        hand: i32 as varint,
+        location: super::LpVec3,
+        sneaking: bool,
+    }
+}
+
+packet! {
+    /// `minecraft:animate`, clientbound: 1 shows the stars of a critical
+    /// hit on an entity.
+    Animate = 0x02 {
+        entity_id: i32 as varint,
+        action: u8,
+    }
+}
+
+/// `ClientboundAnimatePacket.CRITICAL_HIT`.
+pub const ANIMATE_CRITICAL_HIT: u8 = 1;
+/// `SoundSource.NEUTRAL` and `SoundSource.PLAYERS`.
+pub const SOUND_SOURCE_NEUTRAL: i32 = 6;
+pub const SOUND_SOURCE_PLAYERS: i32 = 7;

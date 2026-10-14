@@ -7,10 +7,12 @@
 //! so that block changes and chat reach everyone in the same order. The
 //! connections only decide what their client can see.
 
+mod combat;
 mod command;
 mod interact;
 mod item;
 mod menu;
+mod mob;
 mod physics;
 mod player;
 mod survival;
@@ -150,6 +152,17 @@ pub enum Event {
     /// The respawn button on the death screen.
     Respawn {
         entity_id: i32,
+    },
+    /// A left click on an entity.
+    Attack {
+        entity_id: i32,
+        target: i32,
+    },
+    /// A right click on an entity.
+    Interact {
+        entity_id: i32,
+        target: i32,
+        hand: i32,
     },
     /// Disconnect everyone, save, stop the game thread, then answer.
     Shutdown(tokio::sync::oneshot::Sender<()>),
@@ -303,6 +316,8 @@ pub struct Context {
     pub level: Level,
     /// Hands out entity ids, shared with the connections.
     pub entity_ids: Arc<AtomicI32>,
+    /// Whether animals spawn by themselves.
+    pub animals: bool,
 }
 
 /// Starts the tick thread. It runs until every [`Sender`] is dropped, i.e.
@@ -328,6 +343,7 @@ struct Game {
     player_type: i32,
     item_type: i32,
     items: HashMap<i32, item::ItemEntity>,
+    mobs: HashMap<i32, mob::Mob>,
     /// Block changes due later, like a button popping back out.
     scheduled: Vec<Scheduled>,
     /// How many players look into each open container.
@@ -368,6 +384,7 @@ impl Game {
                 .entity_type("minecraft:item")
                 .expect("vanilla entity types"),
             items: HashMap::new(),
+            mobs: HashMap::new(),
             scheduled: Vec::new(),
             openers: HashMap::new(),
             context,
@@ -402,6 +419,7 @@ impl Game {
             self.tick_players();
             self.tick_scheduled();
             self.tick_items();
+            self.tick_mobs();
             self.send_light_updates();
             self.sync_entities();
             self.advance_time();
@@ -532,7 +550,13 @@ impl Game {
                 p.skin_parts = skin_parts;
                 p.main_hand = main_hand;
             }),
-            Event::Swing { entity_id } => self.swing(entity_id),
+            Event::Swing { entity_id } => {
+                let tick = self.tick;
+                if let Some(player) = self.players.get_mut(&entity_id) {
+                    player.last_swing = tick;
+                }
+                self.swing(entity_id);
+            }
             Event::CreativeSlot {
                 entity_id,
                 slot,
@@ -541,6 +565,11 @@ impl Game {
             Event::SelectSlot { entity_id, slot } => {
                 if let Ok(slot @ 0..=8) = usize::try_from(slot) {
                     self.stop_using(entity_id);
+                    // A new item in hand starts its swing anew.
+                    let tick = self.tick;
+                    if let Some(player) = self.players.get_mut(&entity_id) {
+                        player.last_swing = tick;
+                    }
                     self.update_inventory(entity_id, |i| i.select(slot));
                 }
             }
@@ -582,6 +611,12 @@ impl Game {
                 sequence,
             } => self.use_item(entity_id, hand, sequence),
             Event::Respawn { entity_id } => self.respawn(entity_id),
+            Event::Attack { entity_id, target } => self.attack(entity_id, target),
+            Event::Interact {
+                entity_id,
+                target,
+                hand,
+            } => self.interact(entity_id, target, hand),
             Event::Shutdown(_) => unreachable!("handled by the game loop"),
         }
     }
@@ -664,6 +699,7 @@ impl Game {
             invulnerable: 0,
             dead: joined.health <= 0.0,
             using: None,
+            last_swing: 0,
         };
 
         // The newcomer learns about everyone, everyone about the newcomer.
@@ -677,6 +713,9 @@ impl Game {
         let item_type = self.item_type;
         for item in self.items.values_mut() {
             player.send(Outbound::EntityAdded(item.state(item_type)));
+        }
+        for mob in self.mobs.values_mut().filter(|m| m.alive()) {
+            player.send(Outbound::EntityAdded(mob.state()));
         }
         let added = Outbound::PlayerAdded {
             info: Box::new(player.info.clone()),

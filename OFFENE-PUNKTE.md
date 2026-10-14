@@ -5,7 +5,11 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
 
 ## Spielwelt
 
-- Mobs und Tiere: Spawnen, KI, Wegfindung, Kampf, Drops
+- Feindliche Mobs (Zombies, Skelette, Creeper, Spinnen) und weitere Tiere
+- Tiere: speichern (sie verschwinden noch beim Neustart und weit weg von allen
+  Spielern), Babys und Züchten, echte Wegfindung um Hindernisse, Gras fressen
+  und Wolle nachwachsen lassen, Leinen, Reiten
+- Erfahrungskugeln beim Töten
 - Öfen, Räucher- und Schmelzöfen, Braustände (eigene Menüs mit Fortschritt)
 - Redstone: Strom, Kolben, Beobachter, Verstärker, Komparatoren
 - Wasser und Lava fließen, Schwerkraft für Sand und Kies
@@ -21,7 +25,7 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
   beim Abbauen
 - Rüstung schützt (Rüstungswerte, Verzauberungen)
 - Erfahrung: Kugeln, Level
-- Kampf zwischen Spielern, Rückstoß, Schaden durch Feuer, Lava, Ertrinken
+- Schaden durch Feuer, Lava, Ertrinken, Kakteen; Schild, Bogen, Dreizack
 - Statuseffekte, Tränke
 - Schwierigkeitsgrade und Spielregeln (`gamerule`)
 
@@ -48,6 +52,7 @@ echter Minecraft-Client ließ sich in der Entwicklungsumgebung nicht starten.
 - Respawn-Bildschirm und Rückkehr in die Welt
 - Geräusche von Kisten, Türen, Knöpfen und Hebeln
 - Essen (Animation, Ende nach 1,6 s)
+- Tiere: Laufen, Kopfdrehen und Geräusche, wie sie im Client aussehen
 
 ## Nach Fertigstellung: Mod-Schicht für Fabric und Forge
 

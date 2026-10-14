@@ -73,7 +73,7 @@ impl Game {
         }
     }
 
-    /// A sound at a place, for everyone near it but `except`.
+    /// A block sound at a place, for everyone near it but `except`.
     pub(super) fn play_sound(
         &self,
         except: Option<i32>,
@@ -82,12 +82,25 @@ impl Game {
         volume: f32,
         pitch: f32,
     ) {
+        self.play_sound_from(except, name, at, SOUND_SOURCE_BLOCKS, volume, pitch);
+    }
+
+    /// A sound of a `SoundSource` at a place.
+    pub(super) fn play_sound_from(
+        &self,
+        except: Option<i32>,
+        name: &str,
+        at: [f64; 3],
+        source: i32,
+        volume: f32,
+        pitch: f32,
+    ) {
         let Ok(sound) = self.context.data.sound_event(name) else {
             return;
         };
         let packet = Encoded::new(&Sound {
             sound: sound + 1,
-            source: SOUND_SOURCE_BLOCKS,
+            source,
             x: (at[0] * 8.0) as i32,
             y: (at[1] * 8.0) as i32,
             z: (at[2] * 8.0) as i32,
@@ -234,6 +247,7 @@ impl Game {
                     .players
                     .values()
                     .any(|p| p.obstructs(pos, data.collision_shape(state)))
+                && !self.mob_obstructs(pos, data.collision_shape(state))
         });
         if !free {
             return blocks.iter().map(|&(pos, _)| pos).collect();
@@ -567,8 +581,14 @@ impl Game {
                 let allowed = !player.dead
                     && placement::within_reach(player.eyes(), action.pos)
                     && in_world(action.pos);
+                let sword = player
+                    .inventory
+                    .equipment(equipment_slot::MAIN_HAND)
+                    .and_then(|s| self.context.data.item(s.item))
+                    .and_then(|i| i.tool.as_ref())
+                    .is_some_and(|t| !t.can_destroy_blocks_in_creative);
                 match mode {
-                    GameMode::Creative if allowed => {
+                    GameMode::Creative if allowed && !sword => {
                         let changed = self.break_block(action.pos, Some(entity_id));
                         self.finish_block_action(entity_id, action.sequence, &changed);
                     }

@@ -9,7 +9,10 @@
 //!   light, hardness, collision and block entity, in state id order,
 //! - `items.json`: every item with the default components the server needs
 //!   (stack size, tool, food), in network-id order,
-//! - `loot_tables.json`: the block loot tables and the predicates they use,
+//! - `loot_tables.json`: the block and entity loot tables and the predicates
+//!   they use,
+//! - `entities.json`: size, tracking and base attributes of every entity type,
+//!   from `entity_info.json` (`scripts/EntityInfo.java`),
 //! - `recipes.json`: the crafting recipes,
 //! - `ids.json`: the names of further static registries in network-id order.
 //!
@@ -107,6 +110,9 @@ fn main() -> anyhow::Result<()> {
         &generated.join("reports/minecraft/components/item"),
     )?;
     let loot_tables = loot_tables_json(&data)?;
+    let entity_info = read_json(&generated.join("entity_info.json"))
+        .context("entity_info.json: run scripts/EntityInfo.java first")?;
+    let entities = entities_json(&ids["minecraft:entity_type"], &entity_info)?;
     let recipes = recipes_json(&data.join("recipe"))?;
     let mut names = Vec::new();
     for registry in [
@@ -129,6 +135,7 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(out.join("blocks.json"), blocks)?;
     std::fs::write(out.join("items.json"), items)?;
     std::fs::write(out.join("loot_tables.json"), loot_tables)?;
+    std::fs::write(out.join("entities.json"), entities)?;
     std::fs::write(out.join("recipes.json"), recipes)?;
     std::fs::write(
         out.join("ids.json"),
@@ -469,6 +476,23 @@ fn items_json(item_ids: &HashMap<String, i32>, components: &Path) -> anyhow::Res
         if c["minecraft:food"].is_object() {
             line["food"] = c["minecraft:food"].clone();
         }
+        // `attribute_modifiers` of weapons: what they add to the player's
+        // attack damage and speed.
+        for (attribute, key) in [
+            ("minecraft:attack_damage", "attack_damage"),
+            ("minecraft:attack_speed", "attack_speed"),
+        ] {
+            let bonus: f64 = c["minecraft:attribute_modifiers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|m| m["type"] == attribute && m["operation"] == "add_value")
+                .filter_map(|m| m["amount"].as_f64())
+                .sum();
+            if bonus != 0.0 {
+                line[key] = ((bonus * 1e6).round() / 1e6).into();
+            }
+        }
         if c["minecraft:consumable"].is_object() {
             line["consume_seconds"] = c["minecraft:consumable"]["consume_seconds"]
                 .as_f64()
@@ -480,21 +504,68 @@ fn items_json(item_ids: &HashMap<String, i32>, components: &Path) -> anyhow::Res
     Ok(format!("[\n{}\n]\n", lines.join(",\n")))
 }
 
-/// `{"blocks": {"minecraft:stone": <table>}, "predicates": {...}}`, one
-/// table per line.
+/// `{"tables": {"minecraft:blocks/stone": <table>, "minecraft:entities/cow":
+/// ...}, "predicates": {...}}`, one table per line.
 fn loot_tables_json(data: &Path) -> anyhow::Result<String> {
     let mut parts = Vec::new();
-    for (key, dir) in [("blocks", "loot_table/blocks"), ("predicates", "predicate")] {
-        let dir = data.join(dir);
+    for (key, dirs) in [
+        ("tables", &["loot_table/blocks", "loot_table/entities"][..]),
+        ("predicates", &["predicate"][..]),
+    ] {
         let mut lines = Vec::new();
-        for path in walk(&dir)? {
-            let name = slash_path(path.strip_prefix(&dir)?.with_extension("").as_path());
-            lines.push(format!("    \"minecraft:{name}\": {}", read_json(&path)?));
+        for dir in dirs {
+            let root = data.join(if key == "tables" { "loot_table" } else { dir });
+            let dir = data.join(dir);
+            for path in walk(&dir)? {
+                let name = slash_path(path.strip_prefix(&root)?.with_extension("").as_path());
+                lines.push(format!("    \"minecraft:{name}\": {}", read_json(&path)?));
+            }
         }
         lines.sort();
         parts.push(format!("  \"{key}\": {{\n{}\n  }}", lines.join(",\n")));
     }
     Ok(format!("{{\n{}\n}}\n", parts.join(",\n")))
+}
+
+/// Attributes the server uses, from `entity_info.json`.
+const ENTITY_ATTRIBUTES: &[&str] = &[
+    "max_health",
+    "movement_speed",
+    "step_height",
+    "gravity",
+    "knockback_resistance",
+    "safe_fall_distance",
+    "attack_damage",
+];
+
+/// One entity type per line, in network-id order: `{"name", "width",
+/// "height", "eye_height", "tracking_range", "update_interval", "category",
+/// <attributes>?}`.
+fn entities_json(entity_ids: &HashMap<String, i32>, info: &Value) -> anyhow::Result<String> {
+    let mut types: Vec<(&i32, &String)> = entity_ids.iter().map(|(n, id)| (id, n)).collect();
+    types.sort();
+    let mut lines = Vec::new();
+    for (_, name) in types {
+        let entity = &info[name.as_str()];
+        let mut line = serde_json::json!({ "name": name });
+        for key in [
+            "width",
+            "height",
+            "eye_height",
+            "tracking_range",
+            "update_interval",
+            "category",
+        ] {
+            line[key] = entity[key].clone();
+        }
+        for &attribute in ENTITY_ATTRIBUTES {
+            if let Some(value) = entity["attributes"][attribute].as_f64() {
+                line[attribute] = ((value * 1e6).round() / 1e6).into();
+            }
+        }
+        lines.push(format!("  {line}"));
+    }
+    Ok(format!("[\n{}\n]\n", lines.join(",\n")))
 }
 
 /// The shaped and shapeless crafting recipes, one per line.

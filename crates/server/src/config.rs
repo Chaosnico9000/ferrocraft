@@ -30,6 +30,8 @@ pub struct Config {
     pub game_mode: String,
     /// Names of the players who may use operator commands.
     pub operators: Vec<String>,
+    /// Cows, pigs, sheep and chickens spawn near players.
+    pub animals: bool,
 }
 
 impl Default for Config {
@@ -45,6 +47,7 @@ impl Default for Config {
             session_server: crate::auth::SESSION_SERVER.into(),
             game_mode: "survival".into(),
             operators: Vec::new(),
+            animals: true,
         }
     }
 }

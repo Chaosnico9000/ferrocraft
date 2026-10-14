@@ -78,6 +78,8 @@ pub struct Player {
     pub dead: bool,
     /// Eating or drinking.
     pub using: Option<Using>,
+    /// Game tick of the last swing, from which the next one charges.
+    pub last_swing: u64,
 }
 
 /// Slots of the ender chest.

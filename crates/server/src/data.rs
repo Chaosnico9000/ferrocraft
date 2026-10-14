@@ -19,6 +19,7 @@ const ITEMS: &str = include_str!("../../../data/26.3/items.json");
 const IDS: &str = include_str!("../../../data/26.3/ids.json");
 const RECIPES: &str = include_str!("../../../data/26.3/recipes.json");
 const LOOT: &str = include_str!("../../../data/26.3/loot_tables.json");
+const ENTITIES: &str = include_str!("../../../data/26.3/entities.json");
 
 #[derive(Deserialize)]
 struct SyncedRegistry {
@@ -114,6 +115,32 @@ pub struct Item {
     pub food: Option<Food>,
     /// How long eating or drinking takes.
     pub consume_seconds: Option<f32>,
+    /// What the item adds to the player's attack damage and speed in the
+    /// main hand.
+    #[serde(default)]
+    pub attack_damage: f32,
+    #[serde(default)]
+    pub attack_speed: f32,
+}
+
+/// An entity type as `scripts/EntityInfo.java` read it from vanilla.
+#[derive(Debug, Deserialize)]
+pub struct EntityInfo {
+    pub name: String,
+    pub width: f64,
+    pub height: f64,
+    pub eye_height: f64,
+    /// In chunks.
+    pub tracking_range: u32,
+    pub update_interval: u32,
+    /// `MobCategory`: creature, monster, misc, ...
+    pub category: String,
+    pub max_health: Option<f32>,
+    pub movement_speed: Option<f64>,
+    pub step_height: Option<f64>,
+    pub gravity: Option<f64>,
+    pub knockback_resistance: Option<f64>,
+    pub attack_damage: Option<f32>,
 }
 
 /// The `tool` component: how fast an item breaks which blocks.
@@ -122,6 +149,20 @@ pub struct Tool {
     pub rules: Vec<ToolRule>,
     #[serde(default = "one")]
     pub default_mining_speed: f32,
+    /// Wear per broken block.
+    #[serde(default = "one_int")]
+    pub damage_per_block: i32,
+    /// Swords cannot break blocks in creative.
+    #[serde(default = "yes")]
+    pub can_destroy_blocks_in_creative: bool,
+}
+
+fn one_int() -> i32 {
+    1
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn one() -> f32 {
@@ -244,6 +285,8 @@ pub struct GameData {
     face_shapes: Vec<Vec<Aabb>>,
     pub recipes: Recipes,
     pub loot: LootTables,
+    /// By network id.
+    pub entities: Vec<EntityInfo>,
 }
 
 impl GameData {
@@ -324,6 +367,7 @@ impl GameData {
             face_shapes: blocks.face_shapes,
             recipes: Recipes::default(),
             loot: LootTables::load(LOOT)?,
+            entities: serde_json::from_str(ENTITIES).context("parsing entities.json")?,
         };
         data.recipes = Recipes::load(
             RECIPES,
@@ -387,6 +431,20 @@ impl GameData {
 
     pub fn menu(&self, name: &str) -> anyhow::Result<i32> {
         position(&self.ids.menu, name)
+    }
+
+    /// An entity type and its network id.
+    pub fn entity(&self, name: &str) -> anyhow::Result<(i32, &EntityInfo)> {
+        let id = self.entity_type(name)?;
+        let info = self
+            .entities
+            .get(id as usize)
+            .context("entities.json is shorter than the registry")?;
+        anyhow::ensure!(
+            info.name == name,
+            "entities.json does not match the registry"
+        );
+        Ok((id, info))
     }
 
     pub fn data_component_type(&self, name: &str) -> anyhow::Result<i32> {

@@ -111,3 +111,12 @@ Minecraft-Server (Java Edition 26.3) in Rust. Was er kann und der Aufbau stehen 
   `game_event` 13 (Chunks laden), sonst bleibt der Ladebildschirm stehen.
 - **Kreativ-Slots prüfen die Stapelgröße**: mehr als `max_stack_size` (Schilder 16)
   lehnt der Server ab wie Vanilla.
+- **Entity-Daten für Mobs** zählen über die Klassenhierarchie: `Entity` 0–7,
+  `LivingEntity` 8–14 (Gesundheit 9), `Mob` 15, `AgeableMob` 16–17, danach die
+  Art (Schafwolle 18). Nachzählen in den `defineSynchedData` der Klassen.
+- **Mobs am Boden behalten −0,0784 als Fallgeschwindigkeit** (Schwerkraft mal
+  Luftwiderstand). Wer sie auf 0 setzt, lässt `on_ground` jeden Tick wechseln,
+  und der Tracker schickt dann Teleports statt Bewegungen.
+- **Entity-Größen, Reichweiten und Attribute** liest `scripts/EntityInfo.java`
+  aus dem Jar (`entities.json`); Loot-Tabellen heißen in `loot_tables.json`
+  wie bei Vanilla `minecraft:blocks/…` und `minecraft:entities/…`.

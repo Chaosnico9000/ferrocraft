@@ -17,9 +17,11 @@ geschrieben: keine Vanilla-Klassen, kein JVM-Wrapper.
 | Items | Fallen lassen (Q, Strg+Q, aus dem Inventar), aufsammeln, Mittelklick, Inventar-Klicks wie Vanilla (Ziehen, Shift, Zahlentasten, Doppelklick) | ✅ |
 | Blöcke | Setzen und abbauen (Türen, Betten, Treppen, Doppelkisten), Türen/Falltüren/Zauntore/Hebel/Knöpfe benutzen, Licht wird neu berechnet | ✅ |
 | Block-Entities | Kisten, Fässer, Spender, Trichter, Shulker-Kisten, Endertruhe, Werkbank (Rezepte von Vanilla), Schilder beschreiben | ✅ |
-| Befehle | `/list`, `/gamemode`, `/time`, `/tp`, `/give`, `/kill` (die letzten für Operatoren) | ✅ |
+| Tiere | Kühe, Schweine, Schafe, Hühner: spawnen auf Gras, laufen umher, schauen Spieler an, folgen Futter, flüchten nach Treffern, Loot nach Vanillas Tabellen; Schafe scheren, Kühe melken, Hühner legen Eier | ✅ |
+| Kampf | Nahkampf gegen Tiere und Spieler mit Aufladung, kritischen Treffern, Rückstoß, Waffenschaden aus Vanillas Daten | ✅ |
+| Befehle | `/list`, `/gamemode`, `/time`, `/tp`, `/give`, `/kill`, `/summon` (die letzten für Operatoren) | ✅ |
 | Welt | Speichern im Vanilla-Format samt `level.dat`, Vanilla-Welten laden | ✅ |
-| Fehlt | Mobs, Öfen und Braustände, Redstone, Wasser und Lava fließen, Verzauberungen, Explosionen; alles in [`OFFENE-PUNKTE.md`](OFFENE-PUNKTE.md), auch die geplante Schicht für Fabric- und Forge-Mods | ⏳ |
+| Fehlt | Feindliche Mobs, Öfen und Braustände, Redstone, Wasser und Lava fließen, Verzauberungen, Explosionen; alles in [`OFFENE-PUNKTE.md`](OFFENE-PUNKTE.md), auch die geplante Schicht für Fabric- und Forge-Mods | ⏳ |
 
 Wer sich verbindet, steht in einer endlosen Superflat-Welt (Grundgestein, zwei
 Lagen Erde, Gras), im Überlebensmodus oder in dem Modus aus `game_mode`, sieht
@@ -45,7 +47,8 @@ compression_threshold = 256  # ab dieser Paketgröße komprimieren, -1 = nie
 world = "world"              # Weltordner; leer = nichts speichern
 online_mode = true           # Spieler bei Mojang prüfen (wie Vanilla)
 game_mode = "survival"       # Modus neuer Spieler: survival, creative, adventure, spectator
-operators = ["Chaosnico9000"] # dürfen /gamemode, /time, /tp, /give, /kill und F3+F4
+operators = ["Chaosnico9000"] # dürfen /gamemode, /time, /tp, /give, /kill, /summon und F3+F4
+animals = true               # Kühe, Schweine, Schafe und Hühner spawnen bei Spielern
 ```
 
 ## Die Welt
@@ -83,7 +86,8 @@ cargo run -p ferrocraft-devtools --bin bot -- 127.0.0.1:25565 --roles build,walk
 # Daten für eine Version neu erzeugen (Paket-IDs, Registries, Tags, Blöcke,
 # Items, Rezepte, Loot-Tabellen). Braucht Java: Mojangs Datengenerator und
 # scripts/BlockPhysics.java (Härte, Licht, Kollisionsformen je Zustand)
-# laufen gegen den Vanilla-Jar. Der Server selbst bleibt reines Rust.
+# scripts/EntityInfo.java (Größe, Reichweite, Attribute je Entity-Typ) laufen
+# gegen den Vanilla-Jar. Der Server selbst bleibt reines Rust.
 scripts/gen-reports.sh 26.3
 ```
 
@@ -101,7 +105,8 @@ crates/devtools   Test-Client, gen-data (Daten aus dem Datengenerator),
                   proxy (Mitschnitt), bot
 data/26.3         Aus Mojangs Datengenerator: packets.json (Paket-IDs),
                   registries.json, tags.json, blocks.json (mit Physik),
-                  items.json, recipes.json, loot_tables.json, ids.json
+                  items.json, entities.json, recipes.json, loot_tables.json,
+                  ids.json
                   (in den Server eingebettet)
 scripts           gen-reports.sh: Daten für eine neue Version erzeugen
 ```

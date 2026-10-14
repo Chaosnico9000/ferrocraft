@@ -269,11 +269,13 @@ impl Game {
                 };
                 let context = loot::Context {
                     data,
+                    table: loot::block_table(block),
                     state,
-                    block,
                     pos: at,
                     tool: tool.as_ref(),
                     block_at: &|p| world.block(p),
+                    entity: None,
+                    by_player: true,
                 };
                 drops.extend(context.drops(&mut rng).into_iter().map(|d| (at, d)));
             }
@@ -288,15 +290,23 @@ impl Game {
             self.pop_resource(at, stack);
         }
         self.exhaust(entity_id, 0.005);
-        if hardness != 0.0 {
-            self.wear_tool(entity_id);
+        let per_block = tool
+            .as_ref()
+            .and_then(|t| self.context.data.item(t.item))
+            .and_then(|i| i.tool.as_ref())
+            .map(|t| t.damage_per_block);
+        if hardness != 0.0
+            && let (Some(amount), Some(player)) = (per_block, self.players.get(&entity_id))
+        {
+            let slot = player.inventory.selected_slot();
+            self.wear(entity_id, slot, amount);
         }
         changed
     }
 
-    /// `ItemStack.hurtAndBreak` for a tool that broke a block: one more
-    /// point of `minecraft:damage`, gone at `max_damage`.
-    fn wear_tool(&mut self, entity_id: i32) {
+    /// `ItemStack.hurtAndBreak`: `amount` more points of `minecraft:damage`
+    /// for the item in a slot; at `max_damage` it breaks.
+    pub(super) fn wear(&mut self, entity_id: i32, slot: usize, amount: i32) {
         let data = &self.context.data;
         let Ok(damage_type) = data.data_component_type("minecraft:damage") else {
             return;
@@ -307,14 +317,10 @@ impl Game {
         if !mortal(player.game_mode()) {
             return;
         }
-        let slot = player.inventory.selected_slot();
         let Some(mut stack) = player.inventory.get(slot).cloned() else {
             return;
         };
-        let Some(item) = data.item(stack.item) else {
-            return;
-        };
-        let (Some(max_damage), Some(_)) = (item.max_damage, &item.tool) else {
+        let Some(max_damage) = data.item(stack.item).and_then(|i| i.max_damage) else {
             return;
         };
         let current = stack
@@ -324,8 +330,16 @@ impl Game {
             .find(|(t, _)| *t == damage_type)
             .and_then(|(_, bytes)| VarInt::decode(&mut bytes.as_slice()).ok())
             .map_or(0, |v| v.0);
-        let damage = current + 1;
+        let damage = current + amount;
         let worn = if damage >= max_damage {
+            // `EntityEvent` 47: the main hand's item breaks, with sound and
+            // particles.
+            let event = Encoded::new(&EntityEvent {
+                entity_id,
+                event: if slot == inventory::OFF_HAND { 48 } else { 47 },
+            });
+            player.send(Outbound::Packet(Arc::new(event.clone())));
+            self.broadcast_entity(entity_id, vec![event]);
             None
         } else {
             let mut bytes = Vec::new();
