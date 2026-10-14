@@ -118,6 +118,8 @@ pub async fn handle(
     let entity_id = server.next_entity_id();
     let (outbound, mut inbound) = unbounded_channel();
     server.online_players.fetch_add(1, Ordering::Relaxed);
+    // From here on, however this ends, the player counts as gone again.
+    let _presence = Presence { server, entity_id };
     let information = settings.information;
     let saved = match &server.storage {
         Some(storage) => storage.load_player(profile.uuid, &server.data)?,
@@ -159,7 +161,6 @@ pub async fn handle(
         main_hand: information.as_ref().map_or(1, |i| i.main_hand),
         outbound,
     })));
-    let _presence = Presence { server, entity_id };
 
     let requested = information
         .as_ref()

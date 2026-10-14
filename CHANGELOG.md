@@ -59,6 +59,8 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
   Fassung bleibt wie bei Vanilla als `…_old` liegen und wird gelesen, wenn die
   neue kaputt ist. Eine unlesbare Spielerdatei verhindert den Beitritt nicht
   mehr.
+- Scheitert ein Beitritt mitten drin, zählt der Spieler nicht weiter als
+  online.
 
 ### Geändert
 

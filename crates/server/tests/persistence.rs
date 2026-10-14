@@ -163,3 +163,42 @@ async fn chest_contents_survive_a_restart() {
     let stone = content.items.0[5].0.as_ref().unwrap();
     assert_eq!((stone.item, stone.count), (STONE_ITEM, 64));
 }
+
+#[tokio::test]
+async fn a_broken_player_file_does_not_keep_the_player_out() {
+    let world = TempWorld::new("broken-player");
+    let config = Config {
+        world: world.0.to_string_lossy().into_owned(),
+        ..test_config()
+    };
+    let (server, addr) = start_server(config.clone(), Timing::default()).await;
+    let (alex, _) = join(addr, "Alex", 2).await;
+    drop(alex);
+    server.shutdown().await;
+    // As a hard shutdown can leave it: empty, and no backup.
+    let players = world.0.join("players/data");
+    for entry in std::fs::read_dir(&players).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "dat") {
+            std::fs::write(&path, b"").unwrap();
+        } else {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
+    let (server, addr) = start_server(config, Timing::default()).await;
+    let (alex, _) = join(addr, "Alex", 2).await;
+    drop(alex);
+    // Leaving counts as leaving.
+    for _ in 0..100 {
+        if server
+            .online_players
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 0
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the player still counts as online");
+}
