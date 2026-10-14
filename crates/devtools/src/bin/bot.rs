@@ -339,7 +339,8 @@ impl Bot {
                 signature: None,
                 last_seen_offset: 0,
                 acknowledged: [0; 3],
-                checksum: 1,
+                // `LastSeenMessages.Update.IGNORE_CHECKSUM`: nothing seen to check.
+                checksum: 0,
             })
             .await;
     }
