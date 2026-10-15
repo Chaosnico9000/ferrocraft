@@ -7,6 +7,53 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
 
 ### Neu
 
+- Block-Updates wie Vanillas `Level.setBlock`: Ein geänderter Block sagt es
+  seinen Nachbarn (`neighborChanged`, in Vanillas Reihenfolge und ohne
+  Rekursion über den `CollectingNeighborUpdater`), die ihre Form anpassen
+  (`updateShape`): Pflanzen ohne Boden, Fackeln, Hebel, Knöpfe und
+  Druckplatten ohne Halt fallen mit Beute ab. Dazu geplante Ticks mit
+  Prioritäten (`LevelTicks`) und Zufalls-Ticks in den Chunks um die Spieler.
+  Geplante Ticks werden wie bei Vanilla im Chunk gespeichert und laufen nach
+  dem Neustart weiter.
+- Wasser und Lava fließen nach Vanillas `FlowingFluid`: eine Stufe weniger je
+  Block (Lava zwei), nach unten zuerst, zum nächsten Loch in bis zu vier
+  Blöcken (Lava zwei), alle 5 Ticks (Lava 30); zwei Wasserquellen machen eine
+  dritte. Lava an Wasser wird zu Obsidian oder Bruchstein, Lava auf Wasser zu
+  Stein. Wasser spült Pflanzen, Fackeln und Redstone weg und lässt sie
+  fallen. Eimer schöpfen Quellen und gießen sie aus, auch in Blöcke, die
+  Wasser halten (`waterlogged`). Gegen Vanilla geprüft: dieselben Befehle auf
+  beiden Servern ergeben Block für Block dieselbe Welt.
+- Fallende Blöcke: Sand, Kies, Betonpulver, Ambosse und andere fallen als
+  Entity und landen wieder als Block, wo kein Platz ist als Item;
+  Betonpulver wird im Wasser zu Beton.
+- Landwirtschaft: Hacke, Schaufel und Axt verwandeln Blöcke nach Vanillas
+  `block_transformer`-Daten (Ackerboden, Trampelpfad, entrindete Stämme,
+  Kupfer abschaben). Samen nur auf Ackerboden; Weizen, Karotten, Kartoffeln,
+  Rote Bete wachsen nach Licht und Nachbarschaft, nasser Ackerboden
+  beschleunigt; Kürbis- und Melonenstiele setzen Früchte. Ackerboden wird
+  nass in der Nähe von Wasser, trocknet sonst aus und wird zu Erde, Fallen
+  zertrampelt ihn.
+- Bäume aus Setzlingen nach Vanillas Baum-Features im Datenpaket (Stamm- und
+  Laubformen: gerade, gegabelt, Schwarzeiche, große Eiche, Kirsche; Kugel,
+  Fichte, Akazie, Schwarzeiche, große Eiche, Kirsche); Schwarzeichen und
+  Blasseichen aus vier Setzlingen. Laub ohne Stamm in Reichweite zerfällt und
+  lässt Setzlinge, Stöcke und Äpfel fallen; gesetztes Laub bleibt.
+- Gras breitet sich im Licht auf Erde aus und stirbt im Dunkeln, Zuckerrohr
+  und Kakteen wachsen bis drei Blöcke hoch (Kakteen blühen), Knochenmehl
+  lässt Pflanzen, Setzlinge und Gras wachsen.
+- Redstone: Hebel, Knöpfe, Druckplatten (Stein, Holz, Wägeplatten) und
+  Redstone-Fackeln und -Blöcke geben Signal, starke und schwache Ladung von
+  Blöcken wie bei Vanilla. Leitungen mit Vanillas Standard-Auswertung, ihre
+  Verbindungen (auch über Stufen) und Kreuz/Punkt per Rechtsklick;
+  Redstone-Fackeln als Inverter (brennen bei zu schnellem Takt aus);
+  Verstärker mit 1–4 Ticks Verzögerung, Sperre von der Seite, Rechtsklick
+  stellt um. Lampen (aus nach 4 Ticks), Türen, Eisentüren, Falltüren,
+  Zauntore und TNT reagieren auf Signale.
+- Befehle `/setblock`, `/fill` (mit `destroy`, `keep`, `hollow`, `outline`,
+  `replace`) und `/gamerule` für `random_tick_speed`,
+  `water_source_conversion` und `lava_source_conversion`.
+- `compare_worlds` (Beispielprogramm): zwei Welten Block für Block
+  vergleichen.
 - Bogen: Rechtsklick spannt, Loslassen schießt; die Kraft hängt von der
   Spannzeit ab, voll gespannt fliegen kritische Pfeile mit Zufallsbonus. Im
   Überlebensmodus braucht er Pfeile, verbraucht einen pro Schuss und nutzt
@@ -124,6 +171,15 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
   online.
 
 ### Geändert
+
+- Pflanzen, Fackeln und Redstone-Bauteile lassen sich nur setzen, wo sie
+  halten (Samen auf Ackerboden, Zuckerrohr neben Wasser …); Fackeln an
+  Wänden werden zu Wandfackeln. Gesetztes Laub zerfällt nicht. Gesetzte
+  Lampen und Türen sind gleich an, wenn sie Strom haben.
+- Beim Benutzen eines Items dreht sich der Spieler wie bei Vanilla auf die
+  Blickrichtung des Pakets `use_item` (Bogen, Eimer).
+- Knöpfe springen über geplante Block-Ticks zurück statt über eine eigene
+  Warteschlange; sie geben jetzt Redstone-Signal.
 
 - RSA beim Login über aws-lc-rs (zeitkonstant) statt des `rsa`-Crates mit
   RUSTSEC-2023-0071; der Server-Schlüssel hat jetzt 2048 Bit.

@@ -40,6 +40,11 @@ pub const SEA_LEVEL: i32 = -63;
 /// Chunk coordinates.
 pub type ChunkPos = (i32, i32);
 
+/// Whether a y lies inside the world's height.
+pub fn in_height(y: i32) -> bool {
+    (MIN_Y..=MAX_Y).contains(&y)
+}
+
 pub fn chunk_of(pos: BlockPos) -> ChunkPos {
     (pos.x >> 4, pos.z >> 4)
 }
@@ -123,7 +128,54 @@ pub struct World {
     unlit: Mutex<Vec<ChunkPos>>,
     /// Block entities that work by themselves every tick: furnaces.
     ticking: Mutex<HashSet<BlockPos>>,
+    /// Scheduled ticks read with loaded chunks, for the game to take over.
+    saved_ticks: Mutex<Vec<SavedTick>>,
     data: Arc<GameData>,
+}
+
+/// A scheduled tick as chunks store it (`SavedTick`): which block or fluid,
+/// where, in how many ticks, with what priority.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedTick {
+    pub id: String,
+    pub pos: BlockPos,
+    pub delay: i32,
+    pub priority: i32,
+    pub fluid: bool,
+}
+
+impl SavedTick {
+    fn from_nbt(nbt: &Nbt, fluid: bool) -> Option<Self> {
+        let int = |key| match nbt.get(key) {
+            Some(Nbt::Int(v)) => Some(*v),
+            _ => None,
+        };
+        let Some(Nbt::String(id)) = nbt.get("i") else {
+            return None;
+        };
+        Some(Self {
+            id: id.clone(),
+            pos: BlockPos {
+                x: int("x")?,
+                y: int("y")?,
+                z: int("z")?,
+            },
+            delay: int("t")?,
+            priority: int("p").unwrap_or(0),
+            fluid,
+        })
+    }
+
+    pub fn to_nbt(&self) -> Nbt {
+        Nbt::Compound(vec![
+            ("i".into(), Nbt::String(self.id.clone())),
+            ("x".into(), Nbt::Int(self.pos.x)),
+            ("y".into(), Nbt::Int(self.pos.y)),
+            ("z".into(), Nbt::Int(self.pos.z)),
+            ("t".into(), Nbt::Int(self.delay)),
+            ("p".into(), Nbt::Int(self.priority)),
+        ])
+    }
 }
 
 /// Block entities that tick.
@@ -165,6 +217,7 @@ impl World {
             light_updates: Mutex::new(HashMap::new()),
             unlit: Mutex::new(Vec::new()),
             ticking: Mutex::new(HashSet::new()),
+            saved_ticks: Mutex::new(Vec::new()),
             data,
         };
         world.template = world.encode(0, 0, &world.generate());
@@ -333,6 +386,53 @@ impl World {
         positions
     }
 
+    /// Random ticks (`ServerLevel.tickChunk`): `per_section` random
+    /// positions in every section of the changed chunks within `radius`
+    /// chunks of a center, those whose state ticks randomly. Untouched
+    /// superflat chunks have nothing that would change.
+    pub fn random_ticks(
+        &self,
+        centers: &[ChunkPos],
+        radius: i32,
+        per_section: u32,
+        data: &GameData,
+        rng: &mut impl rand::Rng,
+    ) -> Vec<(BlockPos, u32)> {
+        use crate::data::flags::RANDOM_TICKS;
+        let changed = self.changed.read().expect("world lock");
+        let mut picked = Vec::new();
+        for (&(cx, cz), chunk) in changed.iter() {
+            let near = centers
+                .iter()
+                .any(|&(x, z)| (cx - x).abs() <= radius && (cz - z).abs() <= radius);
+            if !near {
+                continue;
+            }
+            for (index, section) in chunk.sections.iter().enumerate() {
+                if let Section::Uniform(state) = section
+                    && !data.physics(*state).has(RANDOM_TICKS)
+                {
+                    continue;
+                }
+                for _ in 0..per_section {
+                    let i = rng.random_range(0..BLOCKS_PER_SECTION);
+                    let state = section.get(i);
+                    if data.physics(state).has(RANDOM_TICKS) {
+                        picked.push((
+                            BlockPos {
+                                x: cx * 16 + (i % 16) as i32,
+                                y: MIN_Y + index as i32 * 16 + (i / 256) as i32,
+                                z: cz * 16 + ((i / 16) % 16) as i32,
+                            },
+                            state,
+                        ));
+                    }
+                }
+            }
+        }
+        picked
+    }
+
     /// The highest block of a column that is not air, or the bottom of the
     /// world below it (`Heightmap.Types.WORLD_SURFACE` minus one).
     pub fn top_y(&self, x: i32, z: i32) -> i32 {
@@ -398,6 +498,13 @@ impl World {
             })
             .collect();
         let lit = stored.light.is_some();
+        let mut saved = self.saved_ticks.lock().expect("world lock");
+        for (key, fluid) in [("block_ticks", false), ("fluid_ticks", true)] {
+            if let Some(Nbt::List(ticks)) = stored.nbt.get(key) {
+                saved.extend(ticks.iter().filter_map(|t| SavedTick::from_nbt(t, fluid)));
+            }
+        }
+        drop(saved);
         self.ticking.lock().expect("world lock").extend(
             stored
                 .block_entities
@@ -426,6 +533,16 @@ impl World {
         }
     }
 
+    /// Saves the chunk at the next save even if its blocks did not change.
+    pub fn mark_dirty(&self, chunk: ChunkPos) {
+        self.dirty.lock().expect("world lock").insert(chunk);
+    }
+
+    /// The scheduled ticks of the chunks loaded so far.
+    pub fn take_saved_ticks(&self) -> Vec<SavedTick> {
+        std::mem::take(&mut *self.saved_ticks.lock().expect("world lock"))
+    }
+
     /// Lights the loaded chunks that came without light, such as those
     /// Ferrocraft saved.
     pub fn light_loaded(&self) {
@@ -443,7 +560,14 @@ impl World {
 
     /// Writes the region files of the chunks changed since the last save;
     /// returns how many chunks those regions hold.
-    pub fn save(&self, storage: &Storage, data: &GameData) -> anyhow::Result<usize> {
+    /// `ticks` gives the scheduled ticks of a chunk, which replace those
+    /// it was loaded with.
+    pub fn save(
+        &self,
+        storage: &Storage,
+        data: &GameData,
+        ticks: &dyn Fn(ChunkPos) -> Vec<SavedTick>,
+    ) -> anyhow::Result<usize> {
         let dirty: Vec<ChunkPos> = self.dirty.lock().expect("world lock").drain().collect();
         let regions: HashSet<(i32, i32)> = dirty.iter().map(|&pos| region_of(pos)).collect();
         let mut written = 0;
@@ -470,7 +594,7 @@ impl World {
                                 chunk_to_nbt(*pos, &states, block_entities, stored.as_ref(), data)
                             }
                         };
-                        (*pos, nbt)
+                        (*pos, with_ticks(nbt, &ticks(*pos)))
                     })
                     .collect()
             };
@@ -572,6 +696,23 @@ impl World {
             light: chunk.light.to_packet(top_light, None),
         }
     }
+}
+
+/// A chunk's NBT with `block_ticks` and `fluid_ticks` set to `ticks`.
+fn with_ticks(nbt: Nbt, ticks: &[SavedTick]) -> Nbt {
+    let Nbt::Compound(mut entries) = nbt else {
+        return nbt;
+    };
+    entries.retain(|(k, _)| k != "block_ticks" && k != "fluid_ticks");
+    for (key, fluid) in [("block_ticks", false), ("fluid_ticks", true)] {
+        let list = ticks
+            .iter()
+            .filter(|t| t.fluid == fluid)
+            .map(SavedTick::to_nbt)
+            .collect();
+        entries.push((key.into(), Nbt::List(list)));
+    }
+    Nbt::Compound(entries)
 }
 
 fn column_index(x: i32, z: i32) -> usize {

@@ -7,10 +7,14 @@
 //! so that block changes and chat reach everyone in the same order. The
 //! connections only decide what their client can see.
 
+mod blocks;
 mod combat;
 mod command;
 mod explosion;
+mod falling;
+mod fluid;
 mod furnace;
+mod growth;
 mod interact;
 mod item;
 mod menu;
@@ -20,6 +24,7 @@ mod path;
 mod physics;
 mod player;
 mod projectile;
+mod redstone;
 mod survival;
 mod tnt;
 mod tracker;
@@ -158,6 +163,8 @@ pub enum Event {
         entity_id: i32,
         hand: i32,
         sequence: i32,
+        /// Where the player looks while using it, yaw and pitch.
+        rot: [f32; 2],
     },
     /// The respawn button on the death screen.
     Respawn {
@@ -372,20 +379,38 @@ struct Game {
     /// `Level.skyDarken` and `monsters_burn` at the time of day.
     sky_darken: i32,
     monsters_burn: bool,
-    /// Block changes due later, like a button popping back out.
-    scheduled: Vec<Scheduled>,
     /// How many players look into each open container.
     openers: HashMap<BlockPos, usize>,
+    /// What each block does when things change around it, by block id.
+    kinds: Vec<blocks::Kind>,
+    updater: blocks::Updater,
+    block_ticks: blocks::Ticks,
+    fluid_ticks: blocks::Ticks,
+    /// Whether fluid gets past two collision shapes in a direction.
+    wall_cache: HashMap<(u16, u16, u8), bool>,
+    /// Off while a wire asks what powers it besides other wires.
+    wire_signals: bool,
+    torch_toggles: Vec<redstone::Toggle>,
+    falling: HashMap<i32, falling::FallingBlock>,
+    rules: GameRules,
 }
 
-/// A block that changes from one state to another at a game tick, if it is
-/// still in the first.
-#[derive(Debug, Clone, Copy)]
-struct Scheduled {
-    tick: u64,
-    pos: BlockPos,
-    from: u32,
-    to: u32,
+/// The game rules Ferrocraft follows (`GameRules`).
+#[derive(Debug, Clone)]
+pub struct GameRules {
+    pub random_tick_speed: u32,
+    pub water_source_conversion: bool,
+    pub lava_source_conversion: bool,
+}
+
+impl Default for GameRules {
+    fn default() -> Self {
+        Self {
+            random_tick_speed: 3,
+            water_source_conversion: true,
+            lava_source_conversion: false,
+        }
+    }
 }
 
 impl Game {
@@ -421,8 +446,16 @@ impl Game {
             explosion_knockback: Vec::new(),
             sky_darken: 0,
             monsters_burn: false,
-            scheduled: Vec::new(),
             openers: HashMap::new(),
+            kinds: blocks::Kind::all(&context.data),
+            updater: blocks::Updater::default(),
+            block_ticks: blocks::Ticks::default(),
+            fluid_ticks: blocks::Ticks::default(),
+            wall_cache: HashMap::new(),
+            wire_signals: true,
+            torch_toggles: Vec::new(),
+            falling: HashMap::new(),
+            rules: GameRules::default(),
             context,
             players: HashMap::new(),
             air,
@@ -432,6 +465,7 @@ impl Game {
     }
 
     fn run(mut self, events: &Receiver<Event>) {
+        self.restore_ticks();
         let mut durations = Vec::with_capacity(STATS_WINDOW);
         let mut next = Instant::now();
         loop {
@@ -453,12 +487,14 @@ impl Game {
             }
             self.keep_alives(begin);
             self.tick_players();
-            self.tick_scheduled();
+            self.tick_blocks();
             self.tick_items();
             self.tick_mobs();
             self.tick_arrows();
             self.tick_tnt();
+            self.tick_falling();
             self.tick_orbs();
+            self.tick_plates();
             self.tick_furnaces();
             self.send_light_updates();
             self.sync_entities();
@@ -489,6 +525,8 @@ impl Game {
                     animals = self.mobs.values().filter(|m| !m.kind.hostile()).count(),
                     items = self.items.len(),
                     stored = self.stored.len(),
+                    block_ticks = self.block_ticks.len(),
+                    fluid_ticks = self.fluid_ticks.len(),
                     "tick stats"
                 );
             }
@@ -653,7 +691,18 @@ impl Game {
                 entity_id,
                 hand,
                 sequence,
-            } => self.use_item(entity_id, hand, sequence),
+                rot: [yaw, pitch],
+            } => {
+                // `handleUseItem` turns the player first.
+                if let Some(player) = self.players.get_mut(&entity_id)
+                    && yaw.is_finite()
+                    && pitch.is_finite()
+                {
+                    player.yaw = yaw;
+                    player.pitch = pitch.clamp(-90.0, 90.0);
+                }
+                self.use_item(entity_id, hand, sequence)
+            }
             Event::Respawn { entity_id } => self.respawn(entity_id),
             Event::Attack { entity_id, target } => self.attack(entity_id, target),
             Event::Interact {
@@ -930,7 +979,21 @@ impl Game {
         if let Err(err) = self.context.level.save(&storage, LAYERS, BIOME, difficulty) {
             warn!("saving level.dat failed: {err:#}");
         }
-        match self.context.world.save(&storage, &self.context.data) {
+        // Chunks with ticks waiting are saved with them.
+        for chunk in self
+            .block_ticks
+            .chunks()
+            .into_iter()
+            .chain(self.fluid_ticks.chunks())
+        {
+            self.context.world.mark_dirty(chunk);
+        }
+        let ticks = |chunk| self.saved_ticks(chunk);
+        match self
+            .context
+            .world
+            .save(&storage, &self.context.data, &ticks)
+        {
             Ok(0) => {}
             Ok(chunks) => debug!(chunks, "saved the world"),
             Err(err) => warn!("saving the world failed: {err:#}"),
@@ -1043,12 +1106,6 @@ impl Game {
         }
     }
 
-    fn set_block(&self, pos: BlockPos, state: u32) {
-        if self.context.world.set_block(pos, state) {
-            self.broadcast(None, &Outbound::BlockChanged { pos, state });
-        }
-    }
-
     /// Like vanilla after a block action: the true state of the blocks the
     /// client may have predicted wrongly, then the acknowledgement.
     fn finish_block_action(&self, entity_id: i32, sequence: i32, refresh: &[BlockPos]) {
@@ -1111,12 +1168,28 @@ impl Game {
     }
 
     /// Everything thrown or dropped that a new player should see besides
-    /// items and mobs: arrows, experience orbs and lit TNT.
+    /// items and mobs: arrows, experience orbs, lit TNT and falling blocks.
     fn projectile_states(&mut self) -> Vec<Arc<EntityState>> {
         let mut states = self.arrow_states();
         states.extend(self.orb_states());
         states.extend(self.tnt_states());
+        states.extend(self.falling_states());
         states
+    }
+
+    /// Pressure plates feel what stands on them.
+    fn tick_plates(&mut self) {
+        let mut boxes: Vec<crate::data::Aabb> = self
+            .players
+            .values()
+            .filter(|p| !p.dead && p.game_mode() != GameMode::Spectator)
+            .map(|p| p.bounds())
+            .collect();
+        boxes.extend(self.mobs.values().filter(|m| m.alive()).map(|m| m.bounds()));
+        boxes.extend(self.items.values().map(|i| i.bounds()));
+        for bounds in boxes {
+            self.plates_touched(bounds);
+        }
     }
 
     /// Vanilla's rule (`ServerCommonPacketListenerImpl.keepConnectionAlive`):

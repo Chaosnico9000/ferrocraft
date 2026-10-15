@@ -526,6 +526,7 @@ impl Session<'_> {
                     entity_id,
                     hand: use_item.hand,
                     sequence: use_item.sequence,
+                    rot: [use_item.yaw, use_item.pitch],
                 });
             }
             Attack::ID => {

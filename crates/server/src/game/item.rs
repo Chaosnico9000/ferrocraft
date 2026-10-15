@@ -53,7 +53,7 @@ pub struct ItemEntity {
 }
 
 impl ItemEntity {
-    fn bounds(&self) -> Aabb {
+    pub(super) fn bounds(&self) -> Aabb {
         let [x, y, z] = self.pos;
         [
             x - HALF_WIDTH,

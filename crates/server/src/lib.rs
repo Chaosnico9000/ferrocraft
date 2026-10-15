@@ -15,6 +15,7 @@ mod placement;
 mod play;
 mod status;
 pub mod storage;
+mod tree;
 pub mod world;
 
 use std::path::Path;

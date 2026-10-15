@@ -13,15 +13,21 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
   suchen keinen Schatten und laufen beim Schießen nicht seitwärts, keine
   Spinnenreiter, Mobs greifen sich nicht gegenseitig an, keine Rüstung und
   Waffen beim Spawnen
-- Mobs schwimmen nicht (sie meiden Wasser nur), Leitern nutzen nur Spinnen
+- Mobs schwimmen nicht (sie meiden Wasser nur), Leitern nutzen nur Spinnen;
+  Strömung schiebt weder Mobs noch Items, Items treiben nicht auf; Lava setzt
+  nichts in Brand und schadet nicht
 - Braustände (eigenes Menü mit Fortschritt), Trichter und Öfen arbeiten nicht
   zusammen
-- Redstone: Strom, Kolben, Beobachter, Verstärker, Komparatoren
-- Wasser und Lava fließen, Schwerkraft für Sand und Kies
-- TNT durch Redstone, Feuer oder brennende Pfeile zünden; Feuer, das sich
-  ausbreitet; Feuer mit dem Feuerzeug legen
-- Wachsen: Pflanzen, Bäume, Gras und Blätter, die zerfallen
-- Wetter: Regen, Gewitter
+- Redstone: Kolben, Beobachter, Komparatoren, Spender und Werfer,
+  Tageslichtsensoren, Zielblöcke, Stolperdrähte, Schienen; Notenblöcke
+- TNT durch Feuer oder brennende Pfeile zünden; Feuer, das sich ausbreitet;
+  Feuer mit dem Feuerzeug legen
+- Wachsen: Riesenbäume aus vier Setzlingen (Fichte, Tropenbaum), Mangroven,
+  Azaleen, Bienennester an Bäumen; Bambus, Ranken, Kelp, Seetang,
+  Pilze, Beerensträucher, Kakao; Doppelpflanzen ohne Boden fallen nicht ab
+- Wasser: Fischeimer setzen keine Fische aus, Blasensäulen, Eis schmilzt
+  nicht, Schnee fällt nicht
+- Wetter: Regen (bewässert Ackerboden), Gewitter
 - Nether und Ende, Portale
 - Andere Weltgeneratoren als Superflat
 
@@ -34,7 +40,9 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
 - Schaden durch Feuer, Lava, Ertrinken, Kakteen; Schild, Armbrust, Dreizack;
   Spektral- und Trankpfeile wirken wie normale
 - Statuseffekte, Tränke
-- Spielregeln (`gamerule`), etwa `mobGriefing` oder `keepInventory`
+- Weitere Spielregeln: `/gamerule` kennt erst `random_tick_speed` und die
+  beiden Quellwasser-Regeln, und sie werden noch nicht in `level.dat`
+  gespeichert; `mob_griefing`, `keep_inventory` u. a. fehlen
 
 ## Lücken im Vorhandenen
 
@@ -46,11 +54,12 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
   Verzauberungen, Inhalt)
 - Komponenten werden in Spielerdateien in Netzwerkform gespeichert, nicht wie
   bei Vanilla als NBT
-- Weitere Befehle: `/setblock`, `/fill`, `/effect`, `/weather`, `/data`, …;
+- Weitere Befehle: `/effect`, `/weather`, `/data`, `/clone`, …;
   `/summon` ohne NBT, Ziele nur `@s`, `@a`, `@p`, `@r` und Namen
 - Keine Server-Konsole; Befehle gehen nur über einen Spieler (oder den Bot
   mit `--commands`)
-- Pfeile und gezündetes TNT werden nicht gespeichert, Pfeile stecken nicht
+- Pfeile, gezündetes TNT und fallende Blöcke werden nicht gespeichert
+  (fallende Blöcke landen meist, bevor gespeichert wird), Pfeile stecken nicht
   sichtbar in Spielern; Spielerbewegung geht nicht in den Schwung der Pfeile
   ein
 - Bewegungen werden nicht geprüft (Fliegen, Durch-Wände-Laufen im
@@ -71,6 +80,9 @@ echter Minecraft-Client ließ sich in der Entwicklungsumgebung nicht starten.
 - Ofenmenü: Flamme und Pfeil laufen mit, Erfahrungskugeln fliegen zum Spieler
 - Bogen: Spannen und Loslassen, Pfeile im Flug und beim Aufsammeln; TNT
   blinkt und explodiert; Herzen beim Füttern, Jungtiere in halber Größe
+- Wasser und Lava fließen sichtbar, Eimer füllen und leeren (Geräusch,
+  Animation); fallender Sand; Knochenmehl-Partikel; Bäume wachsen;
+  Redstone-Leitungen leuchten nach Stärke, Verstärker und Lampen schalten
 
 ## Nach Fertigstellung: Mod-Schicht für Fabric und Forge
 

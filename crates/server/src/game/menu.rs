@@ -698,7 +698,7 @@ impl Game {
     /// barrel or shulker box decides whether it is open. Lids move with a
     /// block event, barrels change state, and opening and closing are heard.
     fn update_openers(&mut self, pos: BlockPos) {
-        let data = &self.context.data;
+        let data = Arc::clone(&self.context.data);
         let state = self.context.world.block(pos);
         let Some((block_id, block)) = data.block_of(state) else {
             return;

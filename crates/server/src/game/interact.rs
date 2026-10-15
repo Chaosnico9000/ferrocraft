@@ -11,6 +11,7 @@ use ferrocraft_protocol::packets::play::{
     UseItemOn, equipment_slot, player_action, text,
 };
 
+use super::blocks::Kind;
 use super::menu::{Menu, Source};
 use super::player::ENDER_SLOTS;
 use super::{Encoded, Game, Outbound};
@@ -198,7 +199,7 @@ impl Game {
         if !matches!(mode, GameMode::Creative | GameMode::Survival) {
             return self.finish_block_action(entity_id, click.sequence, &refresh);
         }
-        if self.light_tnt(entity_id, click) {
+        if self.light_tnt(entity_id, click) || self.use_item_on_block(entity_id, click) {
             return self.finish_block_action(entity_id, click.sequence, &refresh);
         }
         let changed = self.place(entity_id, click, face);
@@ -243,6 +244,13 @@ impl Game {
             blocks[0].1 = state;
             partner = joined;
         }
+        let yaw = player.yaw;
+        blocks[0].1 = self.placement_state(target, blocks[0].1, face, yaw);
+        let Some(player) = self.players.get(&entity_id) else {
+            return Vec::new();
+        };
+        let data = &self.context.data;
+        let world = &self.context.world;
         let free = blocks.iter().all(|&(pos, state)| {
             in_world(pos)
                 && data.is_replaceable(world.block(pos))
@@ -251,7 +259,7 @@ impl Game {
                     .values()
                     .any(|p| p.obstructs(pos, data.collision_shape(state)))
                 && !self.mob_obstructs(pos, data.collision_shape(state))
-        });
+        }) && self.can_survive(blocks[0].0, blocks[0].1);
         if !free {
             return blocks.iter().map(|&(pos, _)| pos).collect();
         }
@@ -265,6 +273,9 @@ impl Game {
         }
         if let Some((pos, state)) = partner {
             self.set_block(pos, state);
+        }
+        if self.kind(blocks[0].1) == Kind::Repeater {
+            self.repeater_placed(blocks[0].0, blocks[0].1);
         }
         self.swing(entity_id);
         if survival {
@@ -339,58 +350,110 @@ impl Game {
             return true;
         }
         if name == "minecraft:lever" {
-            let powered = block.value(state, "powered") == Some("true");
-            if let Some(changed) =
-                block.with(state, "powered", if powered { "false" } else { "true" })
-            {
-                self.set_block(pos, changed);
-                let center = [
-                    f64::from(pos.x) + 0.5,
-                    f64::from(pos.y) + 0.5,
-                    f64::from(pos.z) + 0.5,
-                ];
-                self.play_sound(
-                    None,
-                    "minecraft:block.lever.click",
-                    center,
-                    0.3,
-                    if powered { 0.5 } else { 0.6 },
-                );
-            }
+            self.pull_lever(pos, state);
             return true;
         }
         if name.ends_with("_button") {
-            if block.value(state, "powered") == Some("true") {
-                return true;
+            if !self.bool_value(state, "powered") {
+                self.press_button(pos, state);
             }
-            let Some(pressed) = block.with(state, "powered", "true") else {
-                return false;
-            };
-            self.set_block(pos, pressed);
-            // `ButtonBlock`: wood stays pressed for 30 ticks, stone for 20.
-            let stone = name.contains("stone") || name.contains("blackstone");
-            let delay = if stone { 20 } else { 30 };
-            self.schedule(delay, pos, pressed, state);
-            let sound = if stone {
-                "stone_button"
-            } else {
-                "wooden_button"
-            };
-            let center = [
-                f64::from(pos.x) + 0.5,
-                f64::from(pos.y) + 0.5,
-                f64::from(pos.z) + 0.5,
-            ];
-            self.play_sound(
-                None,
-                &format!("minecraft:block.{sound}.click_on"),
-                center,
-                1.0,
-                1.0,
-            );
             return true;
         }
+        match self.kind(state) {
+            Kind::Repeater => {
+                self.cycle_repeater(pos, state);
+                return true;
+            }
+            Kind::Wire => return self.toggle_wire(pos, state),
+            _ => {}
+        }
         false
+    }
+
+    /// `getStateForPlacement` of the blocks whose placed state depends on
+    /// their surroundings: wall torches on walls, wires connected, leaves
+    /// that stay, lamps and doors powered, concrete powder in water set.
+    fn placement_state(&self, pos: BlockPos, state: u32, face: Direction, yaw: f32) -> u32 {
+        let data = &self.context.data;
+        match self.kind(state) {
+            Kind::Torch | Kind::RedstoneTorch => {
+                let name = data
+                    .block_of(state)
+                    .map(|(_, b)| b.name.clone())
+                    .unwrap_or_default();
+                let wall_name = name.replace("torch", "wall_torch");
+                let Ok(wall) = data.default_state(&wall_name) else {
+                    return state;
+                };
+                let facings = if face == Direction::Up || face == Direction::Down {
+                    // Standing first; else a wall in the way the player
+                    // looks.
+                    let looking = placement::looking(yaw);
+                    if self.can_survive(pos, state) {
+                        return state;
+                    }
+                    vec![placement::opposite(looking)]
+                } else {
+                    vec![face]
+                };
+                for facing in facings {
+                    let candidate = self.with(wall, "facing", facing.name());
+                    let candidate = if self.value(state, "lit").is_some() {
+                        self.with(candidate, "lit", self.value(state, "lit").unwrap_or("true"))
+                    } else {
+                        candidate
+                    };
+                    if self.can_survive(pos, candidate) {
+                        return candidate;
+                    }
+                }
+                state
+            }
+            Kind::Wire => self.wire_placement(pos),
+            Kind::Repeater => self.repeater_placement(pos, state),
+            Kind::Leaves => {
+                let kept = self.with(state, "persistent", "true");
+                self.leaf_distance_update(pos, kept)
+            }
+            Kind::Lamp | Kind::Door | Kind::Trapdoor | Kind::FenceGate => {
+                self.powered_placement(pos, state)
+            }
+            Kind::ConcretePowder => {
+                let here = self.context.world.block(pos);
+                if self.fluid_state(here).fluid == Some(super::fluid::Fluid::Water)
+                    || self.touches_water(pos)
+                {
+                    self.concrete_of(state)
+                } else {
+                    state
+                }
+            }
+            Kind::Farmland => {
+                if self.can_survive(pos, state) {
+                    state
+                } else {
+                    self.default_of("minecraft:dirt")
+                }
+            }
+            Kind::Spreading | Kind::Snowy => {
+                let above_state = self.context.world.block(super::blocks::above(pos));
+                let snowy = data.state_in_tag(above_state, "minecraft:snow");
+                self.with(state, "snowy", if snowy { "true" } else { "false" })
+            }
+            _ => {
+                // Blocks placed into water hold it.
+                let here = self.context.world.block(pos);
+                let water = self.fluid_state(here);
+                if water.fluid == Some(super::fluid::Fluid::Water)
+                    && water.source
+                    && self.value(state, "waterlogged").is_some()
+                {
+                    self.with(state, "waterlogged", "true")
+                } else {
+                    state
+                }
+            }
+        }
     }
 
     /// `ChestBlock.isChestBlockedAt`: a solid block on top keeps the lid

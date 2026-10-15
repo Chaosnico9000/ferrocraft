@@ -159,3 +159,35 @@ Minecraft-Server (Java Edition 26.3) in Rust. Was er kann und der Aufbau stehen 
 - **Bogen**: Der Client meldet das Loslassen als `player_action`
   RELEASE_USE (6); die Spannzeit zählt der Server selbst. Gezündetes TNT
   trägt die Lunte als Entity-Daten 8 (Int), der Client zählt sie herunter.
+- **Block-Updates laufen wie Vanillas `setBlock`**: erst `onPlace`, dann
+  `neighborChanged` an die sechs Nachbarn (über einen Stapel wie
+  `CollectingNeighborUpdater`, nicht rekursiv), dann `updateShape` mit Tiefe
+  höchstens 512. `onPlace` kommt bei *jeder* Zustandsänderung, nicht nur bei
+  neuem Block; Verstärker melden darüber ihre Ausgabe. Flags wie bei
+  Vanilla (`update::NEIGHBORS` 1, `CLIENTS` 2, `KNOWN_SHAPE` 16,
+  `SUPPRESS_DROPS` 32); Ferrocraft schickt Änderungen immer an die Clients.
+- **Verhalten nach Vanillas Klasse**: `blocks.json` trägt je Block die
+  Klassenkette (`CropBlock`, `FallingBlock`, …), `Kind::of` wählt daraus.
+  Die Flags je Zustand (fest, Zufalls-Ticks, Redstone-Leiter, ersetzbar,
+  feste Seiten, Signalquelle) und die Umrissform liest
+  `scripts/BlockPhysics.java`.
+- **Richtungen im Redstone**: `getSignal(pos, dir)` bekommt die Richtung *vom
+  Fragenden zum Sender*. Eine Fackel gibt dem Block unter sich nichts
+  (`dir == UP`), stark nur dem Block darüber (`getDirectSignal`, `DOWN`). Ein
+  Verstärker nimmt sein Signal von `pos + facing` und gibt es nach
+  `pos - facing` ab.
+- **Lava prüft beim Erstarren oben und die vier Seiten, nicht unten**
+  (`POSSIBLE_FLOW_DIRECTIONS` gegenläufig); Lava, die auf Wasser fließt,
+  macht das Wasser zu Stein.
+- **`/setblock` und `/fill` formen den Block nach seinen Nachbarn**
+  (`Block.updateFromNeighbourShapes`) und lassen nur die genannten
+  Eigenschaften stehen; Leitungen bekommen so ihre Verbindungen. Danach
+  `updateNeighboursOnBlockSet`.
+- **Beute vor dem Block-Update**: `destroyBlock` lässt erst fallen, dann
+  setzt es Luft. Tests, die beides lesen, dürfen die Reihenfolge nicht
+  umdrehen. Wanduhr-Zeiten in Tests sind unzuverlässig, weil der Tick-Thread
+  versäumte Ticks am Stück nachholt; lieber die Reihenfolge prüfen.
+- **Gegenprobe Block für Block**: dieselben Befehle auf einem Vanilla- und
+  einem Ferrocraft-Server, Vanilla mit `save-all flush`, Ferrocraft per
+  SIGTERM speichern, dann `cargo run --release --example compare_worlds`.
+  Unterschiede bei Gras/Erde sind Zufalls-Ticks.

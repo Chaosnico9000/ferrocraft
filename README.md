@@ -15,7 +15,10 @@ geschrieben: keine Vanilla-Klassen, kein JVM-Wrapper.
 | Mehrspieler | Andere Spieler sehen (Bewegung, Kopf, Schleichen, Arm, Ausrüstung, Skins), Tab-Liste mit Ping, Chat | ✅ |
 | Spielmodi | Überleben (Abbauzeit nach Werkzeug, Loot-Tabellen, Werkzeugverschleiß, Leben, Fallschaden, Hunger, Essen, Tod und Respawn), Kreativ, Abenteuer, Zuschauer | ✅ |
 | Items | Fallen lassen (Q, Strg+Q, aus dem Inventar), aufsammeln, Mittelklick, Inventar-Klicks wie Vanilla (Ziehen, Shift, Zahlentasten, Doppelklick) | ✅ |
-| Blöcke | Setzen und abbauen (Türen, Betten, Treppen, Doppelkisten), Türen/Falltüren/Zauntore/Hebel/Knöpfe benutzen, Licht wird neu berechnet | ✅ |
+| Blöcke | Setzen und abbauen (Türen, Betten, Treppen, Doppelkisten), Türen/Falltüren/Zauntore/Hebel/Knöpfe benutzen, Licht wird neu berechnet; Nachbar- und Form-Updates wie Vanillas `setBlock` (Pflanzen und Fackeln ohne Halt fallen ab), geplante und zufällige Ticks, die einen Neustart überstehen | ✅ |
+| Flüssigkeiten | Wasser und Lava fließen wie bei Vanilla (Stufen, Fallen, Suche nach dem nächsten Loch, neue Quellen zwischen zwei Wasserquellen), Lava und Wasser werden zu Obsidian, Bruchstein und Stein; Eimer schöpfen und gießen aus, Blöcke mit Wasser (`waterlogged`); Sand, Kies, Betonpulver und Ambosse fallen, Betonpulver härtet im Wasser | ✅ |
+| Wachsen | Hacke macht Ackerboden (Schaufel Trampelpfade, Axt entrindet, alles aus Vanillas `block_transformer`-Daten), Weizen, Karotten, Kartoffeln, Rote Bete, Kürbis- und Melonenstiele wachsen nach Licht und Bewässerung, Ackerboden trocknet aus und wird zertrampelt; Setzlinge werden zu Bäumen nach Vanillas Baum-Features (Eiche, große Eiche, Birke, Fichte, Tropenbaum, Akazie, Kirsche, Schwarzeiche und Blasseiche 2×2), Laub ohne Stamm zerfällt, Gras breitet sich aus, Zuckerrohr und Kakteen wachsen; Knochenmehl | ✅ |
+| Redstone | Hebel, Knöpfe, Druckplatten (auch Wägeplatten), Redstone-Fackeln (mit Ausbrennen) und Redstone-Blöcke geben Signal; Leitungen mit Vanillas Auswertung (eine Stufe weniger pro Block, verbinden sich, Kreuz und Punkt per Rechtsklick), Verstärker mit Verzögerung und Sperre; Lampen, Türen (auch aus Eisen), Falltüren, Zauntore und TNT reagieren | ✅ |
 | Block-Entities | Kisten, Fässer, Spender, Trichter, Shulker-Kisten, Endertruhe, Werkbank (Rezepte von Vanilla), Schilder beschreiben | ✅ |
 | Öfen | Ofen, Räucherofen, Hochofen: Brennstoffe und Rezepte aus Vanillas Daten, Feuer und Fortschritt im Menü, der Block glüht, Erfahrung beim Herausnehmen | ✅ |
 | Tiere | Kühe, Schweine, Schafe, Hühner: spawnen auf Gras, laufen mit Wegfindung umher, schauen Spieler an, folgen Futter, flüchten nach Treffern, Loot nach Vanillas Tabellen; züchten mit ihrem Futter, Babys wachsen heran und folgen den Eltern (Lämmer in gemischter Farbe); Schafe scheren, Kühe melken, Hühner legen Eier; werden gespeichert | ✅ |
@@ -23,9 +26,9 @@ geschrieben: keine Vanilla-Klassen, kein JVM-Wrapper.
 | Kampf | Nahkampf gegen Mobs und Spieler mit Aufladung, kritischen Treffern, Rückstoß, Waffenschaden aus Vanillas Daten; Bogen mit Spannen, kritischen Pfeilen und Aufsammeln; Rüstung schützt und nutzt sich ab | ✅ |
 | Explosionen | Creeper und TNT (mit Feuerzeug oder Feuerkugel zünden, Kettenreaktionen): Blöcke nach Explosionsfestigkeit, Schaden und Rückstoß nach Deckung | ✅ |
 | Erfahrung | Kugeln von Mobs und Öfen fliegen zum Spieler, Level wie bei Vanilla, beim Tod fällt ein Teil heraus | ✅ |
-| Befehle | `/list`, `/gamemode`, `/time`, `/tp`, `/give`, `/kill`, `/summon`, `/difficulty`, `/experience` (`/xp`) (alle außer `/list` für Operatoren) | ✅ |
+| Befehle | `/list`, `/gamemode`, `/time`, `/tp`, `/give`, `/kill`, `/summon`, `/difficulty`, `/experience` (`/xp`), `/setblock`, `/fill`, `/gamerule` (`random_tick_speed`, `water_source_conversion`, `lava_source_conversion`) (alle außer `/list` für Operatoren) | ✅ |
 | Welt | Speichern im Vanilla-Format samt `level.dat` und Entities, Vanilla-Welten laden | ✅ |
-| Fehlt | Braustände, Redstone, Wasser und Lava fließen, Verzauberungen, Armbrust; alles in [`OFFENE-PUNKTE.md`](OFFENE-PUNKTE.md), auch die geplante Schicht für Fabric- und Forge-Mods | ⏳ |
+| Fehlt | Braustände, Kolben, Komparatoren, Beobachter, Feuer, Verzauberungen, Armbrust; alles in [`OFFENE-PUNKTE.md`](OFFENE-PUNKTE.md), auch die geplante Schicht für Fabric- und Forge-Mods | ⏳ |
 
 Wer sich verbindet, steht in einer endlosen Superflat-Welt (Grundgestein, zwei
 Lagen Erde, Gras), im Überlebensmodus oder in dem Modus aus `game_mode`, sieht
@@ -72,6 +75,10 @@ eines Spielers und beim Beenden (Strg+C oder SIGTERM). Entities in Chunks,
 denen kein Spieler näher als 10 Chunks ist, ruhen wie bei Vanilla und kommen
 zurück, wenn jemand auf 8 Chunks herankommt.
 
+Geplante Ticks (fließendes Wasser, Verstärker, Knöpfe) stehen wie bei
+Vanilla als `block_ticks` und `fluid_ticks` im Chunk und laufen nach dem
+Laden weiter, bei Ferrocraft wie bei Vanilla.
+
 Vanilla 26.3 öffnet so eine Welt ohne Fehler (geprüft mit `data get block`
 für Kisten, Schilder und Öfen und `data get entity` für alle Mob-Arten), und
 Ferrocraft lädt von Vanilla geschriebene Welten samt Biomen, gespeichertem
@@ -100,10 +107,16 @@ cargo run -p ferrocraft-devtools --bin bot -- 127.0.0.1:25565 --roles build,walk
 cargo run -p ferrocraft-devtools --bin bot -- 127.0.0.1:25565 --name Admin \
   --roles idle --seconds 3 --commands "time set midnight;summon zombie ~5 ~ ~"
 
+# Zwei Welten Block für Block vergleichen, z. B. eine Vanilla-Welt und eine
+# Ferrocraft-Welt nach denselben /setblock- und /fill-Befehlen:
+cargo run --release --example compare_worlds -- vanilla/world ferro/world 0 -62 0 47 -55 47
+
 # Daten für eine Version neu erzeugen (Paket-IDs, Registries, Tags, Blöcke,
-# Items, Brennstoffe, Rezepte, Loot-Tabellen). Braucht Java: Mojangs
-# Datengenerator und scripts/BlockPhysics.java (Härte, Explosionsfestigkeit,
-# Licht, Kollisionsformen, Spawnflächen je Zustand)
+# Items, Brennstoffe, Rezepte, Loot-Tabellen, Baum-Features, Werkzeug-
+# Umwandlungen). Braucht Java: Mojangs Datengenerator und
+# scripts/BlockPhysics.java (Härte, Explosionsfestigkeit, Licht, Kollisions-
+# und Umrissformen, Spawnflächen, Redstone-Leiter, feste Seiten, Klassen je
+# Block)
 # scripts/EntityInfo.java (Größe, Reichweite, Attribute je Entity-Typ) laufen
 # gegen den Vanilla-Jar. Der Server selbst bleibt reines Rust.
 scripts/gen-reports.sh 26.3
@@ -118,14 +131,15 @@ crates/server     Netzwerk (tokio, ein Task pro Verbindung), Status, Login und
                   Mojang-Auth (RSA über aws-lc-rs), Configuration, Play,
                   game/ (Tick-Thread: Spieler, Menüs, Überleben, Items,
                   Mobs mit Wegfindung, Pfeile, Explosionen, Erfahrung, Öfen,
-                  Befehle), Welt, Licht, Block-Entities, Rezepte, Loot,
-                  Speichern
+                  Befehle; blocks: Block-Updates und Ticks, fluid, falling,
+                  growth, redstone), Welt, Licht, Block-Entities, Rezepte,
+                  Loot, Bäume (tree.rs), Speichern
 crates/devtools   Test-Client, gen-data (Daten aus dem Datengenerator),
                   proxy (Mitschnitt), bot
 data/26.3         Aus Mojangs Datengenerator: packets.json (Paket-IDs),
                   registries.json, tags.json, blocks.json (mit Physik),
                   items.json, entities.json, recipes.json, loot_tables.json,
-                  ids.json
+                  features.json (Bäume, Werkzeug-Umwandlungen), ids.json
                   (in den Server eingebettet)
 scripts           gen-reports.sh: Daten für eine neue Version erzeugen
 ```

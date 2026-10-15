@@ -4,6 +4,7 @@
 //! `list`.
 
 use ferrocraft_protocol::Nbt;
+use ferrocraft_protocol::codec::BlockPos;
 use ferrocraft_protocol::packets::play::{
     CommandNode, Commands, ComponentPatch, GameMode, ItemStack, NodeKind, text,
 };
@@ -180,6 +181,44 @@ pub fn tree(data: &GameData, permission: u8) -> Commands {
         experience.push(t.literal("query", false, vec![target]));
         root.push(t.literal("experience", false, experience.clone()));
         root.push(t.literal("xp", false, experience));
+
+        // `setblock <pos> <block> [destroy|keep|replace]`.
+        let modes = ["destroy", "keep", "replace"]
+            .iter()
+            .map(|m| t.literal(m, true, Vec::new()))
+            .collect();
+        let block = t.argument("block", "minecraft:block_state", Vec::new(), true, modes);
+        let pos = t.argument("pos", "minecraft:block_pos", Vec::new(), false, vec![block]);
+        root.push(t.literal("setblock", false, vec![pos]));
+
+        // `fill <from> <to> <block> [destroy|hollow|keep|outline|replace]`.
+        let modes = ["destroy", "hollow", "keep", "outline", "replace"]
+            .iter()
+            .map(|m| t.literal(m, true, Vec::new()))
+            .collect();
+        let block = t.argument("block", "minecraft:block_state", Vec::new(), true, modes);
+        let to = t.argument("to", "minecraft:block_pos", Vec::new(), false, vec![block]);
+        let from = t.argument("from", "minecraft:block_pos", Vec::new(), false, vec![to]);
+        root.push(t.literal("fill", false, vec![from]));
+
+        // `gamerule <rule> [value]` for the rules Ferrocraft has.
+        let mut rules = Vec::new();
+        for (rule, kind) in GAME_RULES {
+            let value = match kind {
+                RuleKind::Int => t.argument(
+                    "value",
+                    "brigadier:integer",
+                    [&[1u8][..], &0i32.to_be_bytes()].concat(),
+                    true,
+                    Vec::new(),
+                ),
+                RuleKind::Bool => {
+                    t.argument("value", "brigadier:bool", Vec::new(), true, Vec::new())
+                }
+            };
+            rules.push(t.literal(rule, true, vec![value]));
+        }
+        root.push(t.literal("gamerule", false, rules));
     }
     let root = t.add(NodeKind::Root, false, root);
     Commands {
@@ -187,6 +226,23 @@ pub fn tree(data: &GameData, permission: u8) -> Commands {
         root,
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+enum RuleKind {
+    Int,
+    Bool,
+}
+
+/// The game rules Ferrocraft has, by their 26.3 names.
+const GAME_RULES: &[(&str, RuleKind)] = &[
+    ("random_tick_speed", RuleKind::Int),
+    ("water_source_conversion", RuleKind::Bool),
+    ("lava_source_conversion", RuleKind::Bool),
+];
+
+/// `/fill` and `/setblock` change at most this many blocks
+/// (`max_block_modifications`).
+const MAX_FILL: i64 = 32768;
 
 /// A command's answer: shown to the sender, red if it failed.
 type Reply = Result<Nbt, Nbt>;
@@ -306,6 +362,13 @@ impl Game {
             ["summon", entity, rest @ ..] => self.summon_command(sender, entity, rest),
             ["difficulty", rest @ ..] => self.difficulty_command(rest),
             ["experience" | "xp", rest @ ..] => self.experience_command(sender, rest),
+            ["setblock", x, y, z, block, rest @ ..] => {
+                self.setblock_command(sender, [x, y, z], block, rest)
+            }
+            ["fill", x1, y1, z1, x2, y2, z2, block, rest @ ..] => {
+                self.fill_command(sender, [x1, y1, z1], [x2, y2, z2], block, rest)
+            }
+            ["gamerule", rule, rest @ ..] => self.gamerule_command(rule, rest),
             ["kill", rest @ ..] => {
                 let victims = match rest {
                     [] => vec![sender],
@@ -521,6 +584,225 @@ impl Game {
         Ok(text::translate(
             "commands.summon.success",
             vec![text::translate(&key, Vec::new(), None)],
+            None,
+        ))
+    }
+
+    /// A block position from three words, `~` relative to the sender.
+    fn block_pos(&self, sender: i32, words: [&&str; 3]) -> Result<BlockPos, Nbt> {
+        let base = self.players.get(&sender).map(|p| p.pos).unwrap_or_default();
+        let mut at = [0; 3];
+        for (i, word) in words.iter().enumerate() {
+            let value = parse_coordinate(word, base[i].floor(), false)
+                .ok_or_else(|| error("argument.pos3d.incomplete", Vec::new()))?;
+            at[i] = value.floor() as i32;
+        }
+        Ok(BlockPos {
+            x: at[0],
+            y: at[1],
+            z: at[2],
+        })
+    }
+
+    /// `BlockStateArgument`: `stone`, `minecraft:oak_log[axis=x]`; with the
+    /// properties named.
+    fn block_state(&self, word: &str) -> Result<(u32, Vec<(String, String)>), Nbt> {
+        let (name, properties) = match word.split_once('[') {
+            Some((name, rest)) => (name, rest.strip_suffix(']').unwrap_or(rest)),
+            None => (word, ""),
+        };
+        let name = if name.contains(':') {
+            name.to_owned()
+        } else {
+            format!("minecraft:{name}")
+        };
+        let Some(block) = self.context.data.block_named(&name) else {
+            return Err(error("argument.block.id.invalid", vec![text::plain(&name)]));
+        };
+        let mut state = block.default;
+        let mut named = Vec::new();
+        for pair in properties.split(',').filter(|p| !p.is_empty()) {
+            let Some((key, value)) = pair.split_once('=') else {
+                return Err(error("argument.block.property.unclosed", Vec::new()));
+            };
+            named.push((key.trim().to_owned(), value.trim().to_owned()));
+            state = block.with(state, key.trim(), value.trim()).ok_or_else(|| {
+                error(
+                    "argument.block.property.invalid",
+                    vec![text::plain(&name), text::plain(value), text::plain(key)],
+                )
+            })?;
+        }
+        Ok((state, named))
+    }
+
+    /// Puts a block as `/setblock` and `/fill` do (`BlockInput.place`):
+    /// shaped by its neighbours except for the properties named; `destroy`
+    /// breaks the old one with drops first, `keep` only fills air. Whether
+    /// it changed.
+    fn command_place(
+        &mut self,
+        pos: BlockPos,
+        block: &(u32, Vec<(String, String)>),
+        mode: &str,
+    ) -> bool {
+        let old = self.context.world.block(pos);
+        if mode == "keep" && !self.is_air(old) {
+            return false;
+        }
+        if mode == "destroy" {
+            self.destroy_block(pos, true);
+        }
+        let (state, named) = block;
+        let mut shaped = self.shaped_by_neighbours(pos, *state);
+        if self.is_air(shaped) {
+            shaped = *state;
+        }
+        for (key, value) in named {
+            shaped = self.with(shaped, key, value);
+        }
+        self.set_block_with(pos, shaped, super::blocks::update::CLIENTS)
+    }
+
+    /// `/setblock <pos> <block> [destroy|keep|replace]`.
+    fn setblock_command(
+        &mut self,
+        sender: i32,
+        at: [&&str; 3],
+        block: &str,
+        rest: &[&str],
+    ) -> Reply {
+        let pos = self.block_pos(sender, at)?;
+        let block = self.block_state(block)?;
+        let mode = rest.first().copied().unwrap_or("replace");
+        if !crate::world::in_height(pos.y) {
+            return Err(error("argument.pos.outofworld", Vec::new()));
+        }
+        let old = self.context.world.block(pos);
+        if !self.command_place(pos, &block, mode) {
+            return Err(error("commands.setblock.failed", Vec::new()));
+        }
+        self.updates_after_set(pos, old);
+        Ok(text::translate(
+            "commands.setblock.success",
+            vec![
+                text::plain(&pos.x.to_string()),
+                text::plain(&pos.y.to_string()),
+                text::plain(&pos.z.to_string()),
+            ],
+            None,
+        ))
+    }
+
+    /// `/fill <from> <to> <block> [destroy|hollow|keep|outline|replace]`.
+    fn fill_command(
+        &mut self,
+        sender: i32,
+        from: [&&str; 3],
+        to: [&&str; 3],
+        block: &str,
+        rest: &[&str],
+    ) -> Reply {
+        let (a, b) = (self.block_pos(sender, from)?, self.block_pos(sender, to)?);
+        let block = self.block_state(block)?;
+        let air = (self.air, Vec::new());
+        let mode = rest.first().copied().unwrap_or("replace");
+        let (min, max) = (
+            [a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)],
+            [a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)],
+        );
+        let volume: i64 = (0..3).map(|i| i64::from(max[i] - min[i] + 1)).product();
+        if volume > MAX_FILL {
+            return Err(error(
+                "commands.fill.toobig",
+                vec![
+                    text::plain(&MAX_FILL.to_string()),
+                    text::plain(&volume.to_string()),
+                ],
+            ));
+        }
+        if !crate::world::in_height(min[1]) || !crate::world::in_height(max[1]) {
+            return Err(error("argument.pos.outofworld", Vec::new()));
+        }
+        let mut changed = Vec::new();
+        for x in min[0]..=max[0] {
+            for y in min[1]..=max[1] {
+                for z in min[2]..=max[2] {
+                    let pos = BlockPos { x, y, z };
+                    let edge = x == min[0]
+                        || x == max[0]
+                        || y == min[1]
+                        || y == max[1]
+                        || z == min[2]
+                        || z == max[2];
+                    let (place, mode) = match mode {
+                        "hollow" if !edge => (&air, "replace"),
+                        "outline" if !edge => continue,
+                        "hollow" | "outline" => (&block, "replace"),
+                        other => (&block, other),
+                    };
+                    let old = self.context.world.block(pos);
+                    if self.command_place(pos, place, mode) {
+                        changed.push((pos, old));
+                    }
+                }
+            }
+        }
+        if changed.is_empty() {
+            return Err(error("commands.fill.failed", Vec::new()));
+        }
+        for &(pos, old) in &changed {
+            self.updates_after_set(pos, old);
+        }
+        Ok(text::translate(
+            "commands.fill.success",
+            vec![text::plain(&changed.len().to_string())],
+            None,
+        ))
+    }
+
+    /// `/gamerule <rule> [value]`.
+    fn gamerule_command(&mut self, rule: &str, rest: &[&str]) -> Reply {
+        let Some(&(rule, kind)) = GAME_RULES.iter().find(|(name, _)| *name == rule) else {
+            return Err(error("command.unknown.argument", Vec::new()));
+        };
+        let rules = &mut self.rules;
+        let value = match rest {
+            [] => match rule {
+                "random_tick_speed" => rules.random_tick_speed.to_string(),
+                "water_source_conversion" => rules.water_source_conversion.to_string(),
+                _ => rules.lava_source_conversion.to_string(),
+            },
+            [value] => {
+                match (kind, rule) {
+                    (RuleKind::Int, _) => {
+                        let n: u32 = value
+                            .parse()
+                            .map_err(|_| error("parsing.int.invalid", vec![text::plain(value)]))?;
+                        rules.random_tick_speed = n;
+                    }
+                    (RuleKind::Bool, rule) => {
+                        let b: bool = value
+                            .parse()
+                            .map_err(|_| error("parsing.bool.invalid", vec![text::plain(value)]))?;
+                        if rule == "water_source_conversion" {
+                            rules.water_source_conversion = b;
+                        } else {
+                            rules.lava_source_conversion = b;
+                        }
+                    }
+                }
+                return Ok(text::translate(
+                    "commands.gamerule.set",
+                    vec![text::plain(rule), text::plain(value)],
+                    None,
+                ));
+            }
+            _ => return Err(error("command.unknown.argument", Vec::new())),
+        };
+        Ok(text::translate(
+            "commands.gamerule.query",
+            vec![text::plain(rule), text::plain(&value)],
             None,
         ))
     }

@@ -20,6 +20,7 @@ const IDS: &str = include_str!("../../../data/26.3/ids.json");
 const RECIPES: &str = include_str!("../../../data/26.3/recipes.json");
 const LOOT: &str = include_str!("../../../data/26.3/loot_tables.json");
 const ENTITIES: &str = include_str!("../../../data/26.3/entities.json");
+const FEATURES: &str = include_str!("../../../data/26.3/features.json");
 
 #[derive(Deserialize)]
 struct SyncedRegistry {
@@ -40,7 +41,7 @@ pub type Aabb = [f64; 6];
 
 /// What `scripts/BlockPhysics.java` read from vanilla for one state.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(from = "(u8, u8, bool, u16, u16, u16, u16, u16, u16, u16, u8, bool)")]
+#[serde(from = "RawPhysics")]
 pub struct StatePhysics {
     /// Block light the state gives off, 0–15.
     pub emission: u8,
@@ -57,13 +58,68 @@ pub struct StatePhysics {
     pub fluid: u8,
     /// Monsters may spawn on top (`BlockState.isValidSpawn` for a zombie).
     pub spawnable: bool,
+    /// The bits of [`flags`].
+    pub flags: u16,
+    /// Index into [`GameData::collision_shape`]'s table: the outline that
+    /// aiming hits (`getShape`).
+    pub outline: u16,
 }
 
-type RawPhysics = (u8, u8, bool, u16, u16, u16, u16, u16, u16, u16, u8, bool);
+/// What [`StatePhysics::flags`] holds, as `scripts/BlockPhysics.java`
+/// writes it.
+pub mod flags {
+    /// `BlockState.isSolid`.
+    pub const SOLID: u16 = 1;
+    /// `isRandomlyTicking`.
+    pub const RANDOM_TICKS: u16 = 2;
+    /// `isRedstoneConductor`.
+    pub const CONDUCTOR: u16 = 4;
+    /// `canBeReplaced`.
+    pub const REPLACEABLE: u16 = 8;
+    /// `isFaceSturdy` for the face in 3D data value order (down, up,
+    /// north, south, west, east): `STURDY << direction`.
+    pub const STURDY: u16 = 16;
+    /// The top holds something in its centre (`SupportType.CENTER`).
+    pub const CENTER_TOP: u16 = 1024;
+    /// `isSignalSource`.
+    pub const SIGNAL_SOURCE: u16 = 2048;
+}
+
+type RawPhysics = (
+    u8,
+    u8,
+    bool,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u8,
+    bool,
+    u16,
+    u16,
+);
 
 impl From<RawPhysics> for StatePhysics {
     fn from(
-        (emission, dampening, sky_passes, collision, d, u, n, s, w, e, fluid, spawnable): RawPhysics,
+        (
+            emission,
+            dampening,
+            sky_passes,
+            collision,
+            d,
+            u,
+            n,
+            s,
+            w,
+            e,
+            fluid,
+            spawnable,
+            flags,
+            outline,
+        ): RawPhysics,
     ) -> Self {
         Self {
             emission,
@@ -73,7 +129,20 @@ impl From<RawPhysics> for StatePhysics {
             faces: [d, u, n, s, w, e],
             fluid,
             spawnable,
+            flags,
+            outline,
         }
+    }
+}
+
+impl StatePhysics {
+    pub fn has(&self, flag: u16) -> bool {
+        self.flags & flag != 0
+    }
+
+    /// Whether the face towards `direction` (3D data value) is sturdy.
+    pub fn sturdy(&self, direction: usize) -> bool {
+        self.flags & (flags::STURDY << direction) != 0
     }
 }
 
@@ -95,6 +164,10 @@ pub struct Block {
     /// How much of an explosion's power it swallows.
     pub explosion_resistance: f32,
     pub block_entity: Option<String>,
+    /// Vanilla's class and its superclasses below `Block`, such as
+    /// `["CarrotBlock", "CropBlock", "VegetationBlock"]`.
+    #[serde(default)]
+    pub classes: Vec<String>,
     /// One entry for all states, or one per state.
     states: Vec<StatePhysics>,
 }
@@ -124,6 +197,19 @@ pub struct Item {
     /// As fuel: ticks it burns and how much faster it cooks, in a furnace
     /// and in a smoker or blast furnace.
     pub fuel: Option<[(i32, f32); 2]>,
+    /// What using it on a block turns the block into, such as
+    /// `minecraft:hoe` (see [`Features::block_transformers`]).
+    pub block_transformer: Option<String>,
+}
+
+/// Data pack content that grows and changes blocks, as
+/// `features.json` holds it: vanilla's own JSON.
+#[derive(Debug, Deserialize)]
+pub struct Features {
+    /// Tree features by name, such as `minecraft:oak`.
+    pub trees: HashMap<String, serde_json::Value>,
+    pub block_state_providers: HashMap<String, serde_json::Value>,
+    pub block_transformers: HashMap<String, serde_json::Value>,
 }
 
 /// An entity type as `scripts/EntityInfo.java` read it from vanilla.
@@ -254,6 +340,12 @@ impl Block {
         self.properties.iter().any(|(k, _)| k == key)
     }
 
+    /// Whether vanilla's class for the block is or extends `class`, e.g.
+    /// `FallingBlock`.
+    pub fn is(&self, class: &str) -> bool {
+        self.classes.iter().any(|c| c == class)
+    }
+
     /// The value of one property in `state`.
     pub fn value(&self, state: u32, key: &str) -> Option<&str> {
         self.values(state)
@@ -294,6 +386,9 @@ pub struct GameData {
     pub loot: LootTables,
     /// By network id.
     pub entities: Vec<EntityInfo>,
+    pub features: Features,
+    /// Per block tag, a bit per block id, for quick lookups.
+    block_tags: HashMap<String, Vec<u64>>,
 }
 
 impl GameData {
@@ -375,7 +470,26 @@ impl GameData {
             recipes: Recipes::default(),
             loot: LootTables::load(LOOT)?,
             entities: serde_json::from_str(ENTITIES).context("parsing entities.json")?,
+            features: serde_json::from_str(FEATURES).context("parsing features.json")?,
+            block_tags: HashMap::new(),
         };
+        let words = data.blocks.len().div_ceil(64);
+        if let Some(blocks) = data
+            .tags
+            .registries
+            .iter()
+            .find(|r| r.registry == "minecraft:block")
+        {
+            for (tag, ids) in &blocks.tags {
+                let mut bits = vec![0u64; words];
+                for &id in ids {
+                    if let Some(word) = bits.get_mut(id as usize / 64) {
+                        *word |= 1 << (id as usize % 64);
+                    }
+                }
+                data.block_tags.insert(tag.clone(), bits);
+            }
+        }
         data.recipes = Recipes::load(
             RECIPES,
             |name| data.item_id(name),
@@ -501,6 +615,11 @@ impl GameData {
         &self.collision_shapes[usize::from(self.physics(state).collision)]
     }
 
+    /// What aiming at the state hits (`getShape`).
+    pub fn outline_shape(&self, state: u32) -> &[Aabb] {
+        &self.collision_shapes[usize::from(self.physics(state).outline)]
+    }
+
     /// The part of a face that stops light, `direction` in 3D data value
     /// order (down, up, north, south, west, east).
     pub fn face_shape(&self, state: u32, direction: usize) -> &[Aabb] {
@@ -509,8 +628,22 @@ impl GameData {
 
     /// Whether `tag` (without `#`) of the block registry holds `block`.
     pub fn block_in_tag(&self, tag: &str, block: usize) -> bool {
-        self.block_tag(tag)
-            .is_ok_and(|ids| ids.contains(&(block as i32)))
+        self.block_tags
+            .get(tag)
+            .and_then(|bits| bits.get(block / 64))
+            .is_some_and(|word| word & (1 << (block % 64)) != 0)
+    }
+
+    /// Whether the block of `state` is in a block tag.
+    pub fn state_in_tag(&self, state: u32, tag: &str) -> bool {
+        self.block_of(state)
+            .is_some_and(|(id, _)| self.block_in_tag(tag, id))
+    }
+
+    /// Whether `state` is a state of the block called `name`.
+    pub fn state_is(&self, state: u32, name: &str) -> bool {
+        self.block_named(name)
+            .is_some_and(|b| (b.first..b.first + b.state_count()).contains(&state))
     }
 
     /// The block a state belongs to, with its id; `None` for an invalid state.
@@ -529,6 +662,11 @@ impl GameData {
 
     pub fn block(&self, id: usize) -> &Block {
         &self.blocks[id]
+    }
+
+    /// Every block, in id order.
+    pub fn blocks(&self) -> &[Block] {
+        &self.blocks
     }
 
     /// The block an item places, `None` for items that are not blocks.

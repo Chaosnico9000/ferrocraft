@@ -22,6 +22,7 @@ import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.EntityBlock;
 import net.minecraft.world.entity.EntityTypes;
+import net.minecraft.world.level.block.SupportType;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.lighting.LightEngine;
 import net.minecraft.world.level.material.Fluids;
@@ -76,6 +77,13 @@ public class BlockPhysics {
             out.addProperty("hardness", first.getDestroySpeed(level, pos));
             out.addProperty("requires_tool", first.requiresCorrectToolForDrops());
             out.addProperty("explosion_resistance", block.getExplosionResistance());
+            // The class and its superclasses up to Block, which say how it
+            // behaves: CropBlock, FallingBlock, RedStoneWireBlock, ...
+            JsonArray classes = new JsonArray();
+            for (Class<?> c = block.getClass(); c != Block.class && c != Object.class; c = c.getSuperclass()) {
+                classes.add(c.getSimpleName());
+            }
+            out.add("classes", classes);
             if (block instanceof EntityBlock) {
                 // Asking the types avoids constructing block entities, some of
                 // which need more of the game than the bootstrap sets up.
@@ -89,7 +97,12 @@ public class BlockPhysics {
             // passes down, collision shape, the six face occlusion shapes for
             // light (down, up, north, south, west, east), fluid, whether a
             // zombie may spawn on top (`isValidSpawn`, the rule most monsters
-            // share).
+            // share), and flags: 1 solid (`isSolid`), 2 ticks randomly,
+            // 4 conducts redstone, 8 replaceable (`canBeReplaced`), 16 << d
+            // the face in direction d is sturdy, 1024 the top can hold
+            // something in its centre (a standing torch), 2048 a signal
+            // source; last the outline shape (`getShape`), which aiming
+            // hits.
             JsonArray states = new JsonArray();
             List<String> seen = new ArrayList<>();
             for (BlockState state : block.getStateDefinition().getPossibleStates()) {
@@ -104,6 +117,18 @@ public class BlockPhysics {
                 var fluid = state.getFluidState();
                 s.add(fluid.isEmpty() ? 0 : fluid.getType().isSame(Fluids.WATER) ? 1 : 2);
                 s.add(state.isValidSpawn(level, pos, EntityTypes.ZOMBIE));
+                int flags = 0;
+                if (state.isSolid()) flags |= 1;
+                if (state.isRandomlyTicking()) flags |= 2;
+                if (state.isRedstoneConductor(level, pos)) flags |= 4;
+                if (state.canBeReplaced()) flags |= 8;
+                for (Direction direction : Direction.values()) {
+                    if (state.isFaceSturdy(level, pos, direction)) flags |= 16 << direction.get3DDataValue();
+                }
+                if (state.isFaceSturdy(level, pos, Direction.UP, SupportType.CENTER)) flags |= 1024;
+                if (state.isSignalSource()) flags |= 2048;
+                s.add(flags);
+                s.add(collisions.add(boxes(state.getShape(level, pos))));
                 states.add(s);
                 seen.add(s.toString());
             }

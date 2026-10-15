@@ -14,6 +14,9 @@
 //! - `entities.json`: size, tracking and base attributes of every entity type,
 //!   from `entity_info.json` (`scripts/EntityInfo.java`),
 //! - `recipes.json`: the crafting and cooking recipes,
+//! - `features.json`: what grows from saplings (the tree features of
+//!   `TreeGrower`), the block state providers they use, and the block
+//!   transformers of hoes, shovels and axes,
 //! - `ids.json`: the names of further static registries in network-id order.
 //!
 //!   gen-data <generator output dir> <data/version dir>
@@ -115,6 +118,7 @@ fn main() -> anyhow::Result<()> {
         .context("entity_info.json: run scripts/EntityInfo.java first")?;
     let entities = entities_json(&ids["minecraft:entity_type"], &entity_info)?;
     let recipes = recipes_json(&data.join("recipe"))?;
+    let features = features_json(&data)?;
     let mut names = Vec::new();
     for registry in [
         "entity_type",
@@ -139,6 +143,7 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(out.join("loot_tables.json"), loot_tables)?;
     std::fs::write(out.join("entities.json"), entities)?;
     std::fs::write(out.join("recipes.json"), recipes)?;
+    std::fs::write(out.join("features.json"), features)?;
     std::fs::write(
         out.join("ids.json"),
         format!("{{\n{}\n}}\n", names.join(",\n")),
@@ -150,6 +155,56 @@ fn main() -> anyhow::Result<()> {
         tags.len()
     );
     Ok(())
+}
+
+/// The tree features saplings grow into (`TreeGrower` of 26.3, copied from
+/// the vanilla source like [`SYNCED_REGISTRIES`]).
+const SAPLING_TREES: &[&str] = &[
+    "oak",
+    "fancy_oak",
+    "oak_bees_005",
+    "fancy_oak_bees_005",
+    "spruce",
+    "mega_spruce",
+    "mega_pine",
+    "birch",
+    "birch_bees_005",
+    "jungle_tree_no_vine",
+    "mega_jungle_tree",
+    "acacia",
+    "cherry",
+    "cherry_bees_005",
+    "dark_oak",
+    "pale_oak_bonemeal",
+    "mangrove",
+    "tall_mangrove",
+    "azalea_tree",
+];
+
+/// `{"trees": {name: feature}, "block_state_providers": {name: provider},
+/// "block_transformers": {name: transformer}}`, the features and
+/// providers as the data pack has them.
+fn features_json(data: &Path) -> anyhow::Result<String> {
+    let mut trees = serde_json::Map::new();
+    for name in SAPLING_TREES {
+        let path = data.join(format!("worldgen/feature/{name}.json"));
+        trees.insert(format!("minecraft:{name}"), read_json(&path)?);
+    }
+    let mut out = serde_json::json!({ "trees": trees });
+    for (key, dir) in [
+        ("block_state_providers", "worldgen/block_state_provider"),
+        ("block_transformers", "block_transformer"),
+    ] {
+        let mut entries = serde_json::Map::new();
+        for entry in list_entries(&data.join(dir))? {
+            let path = data
+                .join(dir)
+                .join(format!("{}.json", entry.trim_start_matches("minecraft:")));
+            entries.insert(entry, read_json(&path)?);
+        }
+        out[key] = entries.into();
+    }
+    Ok(serde_json::to_string(&out)? + "\n")
 }
 
 fn read_json(path: &Path) -> anyhow::Result<Value> {
@@ -386,6 +441,7 @@ fn read_blocks(
                 "hardness": block["hardness"],
                 "requires_tool": block["requires_tool"],
                 "explosion_resistance": block["explosion_resistance"],
+                "classes": block["classes"],
                 "states": block["states"],
             });
             if let Some(entity) = block["block_entity"].as_str() {
@@ -477,6 +533,9 @@ fn items_json(
         });
         if let Some(damage) = c["minecraft:max_damage"].as_i64() {
             line["max_damage"] = damage.into();
+        }
+        if let Some(transformer) = c["minecraft:block_transformer"].as_str() {
+            line["block_transformer"] = transformer.into();
         }
         if c["minecraft:tool"].is_object() {
             line["tool"] = c["minecraft:tool"].clone();

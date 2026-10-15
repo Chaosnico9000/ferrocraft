@@ -257,3 +257,41 @@ async fn animals_and_monsters_survive_a_restart() {
     assert!(distance < 4.0, "{:?} vs {:?}", back.pos, cow.pos);
     assert_eq!(back.uuid, cow.uuid, "the same cow");
 }
+
+#[tokio::test]
+async fn flowing_water_goes_on_after_a_restart() {
+    use ferrocraft::data::GameData;
+    use ferrocraft_protocol::packets::play::BlockUpdate;
+    let data = GameData::load().unwrap();
+    let water = data.block_named("minecraft:water").unwrap().first;
+    let world = TempWorld::new("ticks");
+    let config = Config {
+        world: world.0.to_string_lossy().into_owned(),
+        operators: vec!["Alex".into()],
+        ..test_config()
+    };
+    let (server, addr) = start_server(config.clone(), Timing::default()).await;
+    let (mut alex, _) = join(addr, "Alex", 2).await;
+    alex.send(&ChatCommand {
+        command: "setblock 0 -60 4 water".into(),
+    })
+    .await;
+    // Stopped after the first step: its next ticks are waiting.
+    read_matching(&mut alex, |u: &BlockUpdate| {
+        u.pos == BlockPos { x: 1, y: -60, z: 4 } && u.state as u32 == water + 1
+    })
+    .await;
+    server.shutdown().await;
+
+    let (_server, addr) = start_server(config, Timing::default()).await;
+    let (mut alex, _) = join(addr, "Alex", 2).await;
+    // The saved ticks run on: the water reaches its seventh block.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        read_matching(&mut alex, |u: &BlockUpdate| {
+            u.pos == BlockPos { x: 7, y: -60, z: 4 } && u.state as u32 == water + 7
+        }),
+    )
+    .await
+    .expect("the water stood still after the restart");
+}

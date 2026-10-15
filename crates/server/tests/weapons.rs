@@ -32,14 +32,14 @@ async fn run(client: &mut Client, command: &str) {
         .await;
 }
 
-/// Draws the bow in hand for `millis` and lets go.
-async fn shoot(client: &mut Client, millis: u64, sequence: i32) {
+/// Draws the bow in hand for `millis` and lets go, looking `pitch` down.
+async fn shoot(client: &mut Client, millis: u64, sequence: i32, pitch: f32) {
     client
         .send(&UseItem {
             hand: 0,
             sequence,
             yaw: 0.0,
-            pitch: 0.0,
+            pitch,
         })
         .await;
     tokio::time::sleep(Duration::from_millis(millis)).await;
@@ -79,7 +79,7 @@ async fn a_drawn_bow_shoots_hits_and_uses_up_arrows() {
     let cow = read_matching(&mut alex, |a: &AddEntity| a.entity_type == cow_type).await;
     walk(&mut alex, [0.5, -60.0, 0.5], Some([0.0, 10.0])).await;
 
-    shoot(&mut alex, 1100, 1).await;
+    shoot(&mut alex, 1100, 1, 10.0).await;
     let arrow = read_matching(&mut alex, |a: &AddEntity| a.entity_type == arrow_type).await;
     assert_eq!(arrow.data, alex_login.entity_id, "Alex's arrow");
     // One arrow less, and the bow wears.
@@ -104,7 +104,7 @@ async fn a_drawn_bow_shoots_hits_and_uses_up_arrows() {
 
     // Shot steeply down at Alex's feet, the arrow sticks and comes back.
     walk(&mut alex, [0.5, -60.0, 0.5], Some([0.0, 75.0])).await;
-    shoot(&mut alex, 1100, 2).await;
+    shoot(&mut alex, 1100, 2, 75.0).await;
     let arrow = read_matching(&mut alex, |a: &AddEntity| a.entity_type == arrow_type).await;
     read_matching(&mut alex, |d: &SetEntityData| {
         d.entity_id == arrow.entity_id
@@ -123,7 +123,7 @@ async fn a_drawn_bow_shoots_hits_and_uses_up_arrows() {
     assert_eq!(taken.player_id, alex_login.entity_id);
 
     // A tap does not shoot.
-    shoot(&mut alex, 50, 3).await;
+    shoot(&mut alex, 50, 3, 75.0).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     run(&mut alex, "list").await;
     let late = tokio::time::timeout(

@@ -14,7 +14,7 @@ use ferrocraft_protocol::packets::play::{
 use tracing::info;
 
 use super::player::{Digging, Food, Player, Using};
-use super::{Encoded, Game, Outbound, Scheduled};
+use super::{Encoded, Game, Outbound};
 use crate::inventory;
 use crate::loot;
 use crate::storage::MAX_HEALTH;
@@ -477,6 +477,7 @@ impl Game {
         }
 
         let mut damage = 0.0;
+        let mut landed = None;
         if !mortal(player.game_mode()) || player.flying || in_water || climbing {
             player.fall_distance = 0.0;
         } else {
@@ -501,10 +502,16 @@ impl Game {
                 };
                 damage =
                     ((player.fall_distance + 1.0e-6 - SAFE_FALL_DISTANCE) * multiplier).floor();
+                if player.fall_distance > 0.0 {
+                    landed = Some((below, player.fall_distance));
+                }
                 player.fall_distance = 0.0;
             }
         }
         self.exhaust(entity_id, exhaustion);
+        if let Some((below, distance)) = landed {
+            self.trample(below, distance);
+        }
         if damage > 0.0 {
             let name = self.players[&entity_id].name().to_owned();
             let uuid = self.players[&entity_id].uuid();
@@ -778,6 +785,14 @@ impl Game {
             inventory::OFF_HAND
         } else {
             player.inventory.selected_slot()
+        };
+        if matches!(player.game_mode(), GameMode::Survival | GameMode::Creative)
+            && self.use_bucket(entity_id, slot)
+        {
+            return;
+        }
+        let Some(player) = self.players.get(&entity_id) else {
+            return;
         };
         let Some(stack) = player.inventory.get(slot) else {
             return;
@@ -1101,20 +1116,6 @@ impl Game {
         }
     }
 
-    /// Block changes whose time has come, if nothing changed the block in
-    /// between.
-    pub(super) fn tick_scheduled(&mut self) {
-        let now = self.tick;
-        let (due, later): (Vec<Scheduled>, Vec<Scheduled>) =
-            self.scheduled.drain(..).partition(|s| s.tick <= now);
-        self.scheduled = later;
-        for change in due {
-            if self.context.world.block(change.pos) == change.from {
-                self.set_block(change.pos, change.to);
-            }
-        }
-    }
-
     // --- Picking blocks ----------------------------------------------------
 
     /// The middle click (`handlePickItemFromBlock`): selects the block's
@@ -1153,15 +1154,5 @@ impl Game {
             slot,
         }))));
         self.send_slots(entity_id, &changed);
-    }
-
-    /// Schedules a block change, like a button popping back out.
-    pub(super) fn schedule(&mut self, delay: u64, pos: BlockPos, from: u32, to: u32) {
-        self.scheduled.push(Scheduled {
-            tick: self.tick + delay,
-            pos,
-            from,
-            to,
-        });
     }
 }

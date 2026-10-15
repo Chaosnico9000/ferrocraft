@@ -147,6 +147,19 @@ fn ray_box(from: [f64; 3], dir: [f64; 3], b: &Aabb) -> Option<(f64, usize)> {
 /// meets (`Level.clip` with `ClipContext.Block.COLLIDER`), walking the
 /// blocks along the line in order.
 pub fn clip(world: &World, data: &GameData, from: [f64; 3], to: [f64; 3]) -> Option<Hit> {
+    clip_shapes(world, from, to, &|_, state| {
+        data.collision_shape(state).to_vec()
+    })
+}
+
+/// [`clip`] against the shapes `shapes` gives for a block and its state,
+/// such as outlines.
+pub fn clip_shapes(
+    world: &World,
+    from: [f64; 3],
+    to: [f64; 3],
+    shapes: &dyn Fn(BlockPos, u32) -> Vec<Aabb>,
+) -> Option<Hit> {
     let dir = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
     let mut cell = from.map(|v| v.floor() as i32);
     let end = to.map(|v| v.floor() as i32);
@@ -175,8 +188,7 @@ pub fn clip(world: &World, data: &GameData, from: [f64; 3], to: [f64; 3]) -> Opt
         };
         let state = world.block(block);
         let origin = [f64::from(cell[0]), f64::from(cell[1]), f64::from(cell[2])];
-        let best = data
-            .collision_shape(state)
+        let best = shapes(block, state)
             .iter()
             .filter_map(|shape| ray_box(from, dir, &offset(*shape, origin)))
             .min_by(|a, b| a.0.total_cmp(&b.0));
