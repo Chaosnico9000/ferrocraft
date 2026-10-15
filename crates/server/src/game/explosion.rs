@@ -54,20 +54,35 @@ fn exposure(game: &Game, center: [f64; 3], b: &Aabb) -> f32 {
     }
 }
 
+/// An explosion about to go off (`Level.explode`).
+pub(super) struct Blast {
+    pub center: [f64; 3],
+    pub radius: f32,
+    /// What blew up, which the blast spares: a creeper, primed TNT.
+    pub source: Option<i32>,
+    /// Who is to blame: the creeper itself, whoever lit the TNT.
+    pub attacker: Option<i32>,
+    pub breaks_blocks: bool,
+    /// Each broken block's loot survives with a chance of one in the
+    /// radius: on for mobs (`mob_explosion_drop_decay`), off for TNT.
+    pub decay: bool,
+}
+
 impl Game {
-    /// `Level.explode` with `ExplosionInteraction.MOB` or `TNT`: blocks
-    /// break if `breaks_blocks`; `source` is the mob that blew up.
-    pub(super) fn explode(
-        &mut self,
-        center: [f64; 3],
-        radius: f32,
-        source: Option<i32>,
-        breaks_blocks: bool,
-    ) {
+    /// `ServerExplosion.explode`, then the packet for everyone near.
+    pub(super) fn explode(&mut self, blast: Blast) {
+        let Blast {
+            center,
+            radius,
+            source,
+            attacker,
+            breaks_blocks,
+            decay,
+        } = blast;
         let blocks = self.blast_blocks(center, radius);
-        self.blast_entities(center, radius, source);
+        self.blast_entities(center, radius, source, attacker);
         if breaks_blocks {
-            self.blow_up(&blocks, radius);
+            self.blow_up(&blocks, radius, decay, attacker);
         }
         // Everyone within 64 blocks sees and hears it.
         let small = radius < 2.0 || !breaks_blocks;
@@ -170,9 +185,21 @@ impl Game {
 
     /// `hurtEntities`: everything within twice the radius, by distance and
     /// how much the blast sees of it.
-    fn blast_entities(&mut self, center: [f64; 3], radius: f32, source: Option<i32>) {
+    fn blast_entities(
+        &mut self,
+        center: [f64; 3],
+        radius: f32,
+        source: Option<i32>,
+        attacker: Option<i32>,
+    ) {
         let reach = f64::from(radius) * 2.0;
-        let source_name = source.and_then(|s| self.mob_name(s));
+        let source_name = attacker.and_then(|a| self.entity_name(a));
+        // `DamageSources.explosion`: someone to blame makes it theirs.
+        let damage_type = if attacker.is_some() {
+            "minecraft:player_explosion"
+        } else {
+            "minecraft:explosion"
+        };
         let mut targets: Vec<(i32, Aabb, [f64; 3], bool)> = self
             .players
             .values()
@@ -185,6 +212,17 @@ impl Game {
             }
             let eyes = self.mob_eyes(id).unwrap_or([b[0], b[1], b[2]]);
             targets.push((id, b, eyes, false));
+        }
+        // Primed TNT is thrown about too (from its feet, not its eyes).
+        for (id, b) in self.tnt_boxes() {
+            if Some(id) != source {
+                targets.push((
+                    id,
+                    b,
+                    [(b[0] + b[3]) / 2.0, b[1], (b[2] + b[5]) / 2.0],
+                    false,
+                ));
+            }
         }
         for (id, bounds, eyes, is_player) in targets {
             let feet = [
@@ -236,8 +274,8 @@ impl Game {
                     id,
                     Hit {
                         amount: damage,
-                        damage_type: "minecraft:explosion",
-                        attacker: source,
+                        damage_type,
+                        attacker,
                         direct: source,
                         knockback_from: None,
                         message,
@@ -247,16 +285,19 @@ impl Game {
                 if !flying {
                     self.explosion_knockback.push((id, knockback));
                 }
-            } else {
-                self.hurt_mob(id, damage, None, "minecraft:explosion");
+            } else if self.mobs.contains_key(&id) {
+                self.hurt_mob_by(id, damage, attacker, None, damage_type);
                 self.fling_mob(id, knockback);
+            } else {
+                self.fling_tnt(id, knockback);
             }
         }
     }
 
-    /// `interactWithBlocks`: the blocks go, in random order, and each one's
-    /// loot survives with a chance of one in the radius.
-    fn blow_up(&mut self, blocks: &[BlockPos], radius: f32) {
+    /// `interactWithBlocks`: the blocks go, in random order, with their
+    /// loot (with `decay` each survives with a chance of one in the
+    /// radius); TNT among them is lit with a short fuse.
+    fn blow_up(&mut self, blocks: &[BlockPos], radius: f32, decay: bool, attacker: Option<i32>) {
         let mut order = blocks.to_vec();
         order.shuffle(&mut rand::rng());
         let mut drops = Vec::new();
@@ -269,6 +310,14 @@ impl Game {
             let Some((_, block)) = data.block_of(state) else {
                 continue;
             };
+            // `TntBlock.wasExploded`: no drop, but a fuse of half a second
+            // to a second and a half.
+            if block.name == "minecraft:tnt" {
+                self.remove_block(pos, None, false);
+                let fuse = rand::rng().random_range(0..80 / 4) + 80 / 8;
+                self.prime_tnt(pos, attacker, fuse);
+                continue;
+            }
             {
                 let world = &self.context.world;
                 let context = loot::Context {
@@ -280,7 +329,7 @@ impl Game {
                     block_at: &|p| world.block(p),
                     entity: None,
                     by_player: false,
-                    explosion: Some(radius),
+                    explosion: decay.then_some(radius),
                 };
                 drops.extend(
                     context

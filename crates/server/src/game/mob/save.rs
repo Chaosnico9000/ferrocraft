@@ -166,10 +166,10 @@ impl Mob {
         }
         if !self.kind.hostile() {
             // `AgeableMob` and `Animal`.
-            entries.push(("Age".into(), Nbt::Int(0)));
+            entries.push(("Age".into(), Nbt::Int(self.age)));
             entries.push(("ForcedAge".into(), Nbt::Int(0)));
             entries.push(("AgeLocked".into(), Nbt::Byte(0)));
-            entries.push(("InLove".into(), Nbt::Int(0)));
+            entries.push(("InLove".into(), Nbt::Int(self.in_love)));
         }
         match self.kind {
             Kind::Sheep => {
@@ -244,6 +244,17 @@ impl Mob {
             .into_iter()
             .filter_map(|(name, slot)| Some((slot, item_from_nbt(equipment.get(name)?, data)?)))
             .collect::<Vec<(u8, ItemStack)>>();
+        }
+        if !kind.hostile() {
+            if let Some(Nbt::Int(age)) = nbt.get("Age") {
+                mob.age = *age;
+                if *age < 0 {
+                    mob.set_baby(true);
+                }
+            }
+            if let Some(Nbt::Int(love)) = nbt.get("InLove") {
+                mob.in_love = (*love).max(0);
+            }
         }
         match kind {
             Kind::Sheep => {

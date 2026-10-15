@@ -1,15 +1,16 @@
 //! Arrows (`AbstractArrow`): they fly with gravity and drag, stick in the
 //! first block they hit and hurt the first player or mob in their way by
-//! how fast they fly. Skeletons' arrows cannot be picked up; stuck ones
-//! vanish after a minute.
+//! how fast they fly; a fully drawn bow's arrows hit harder at random. A
+//! player's arrows can be picked up again once stuck (in creative they just
+//! go), skeletons' cannot; stuck ones vanish after a minute.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use ferrocraft_protocol::codec::BlockPos;
 use ferrocraft_protocol::packets::play::{
-    EntityData, EntityDataValue, EntityDataValues, LpVec3, SOUND_SOURCE_NEUTRAL, SetEntityData,
-    SetEntityMotion, text,
+    EntityData, EntityDataValue, EntityDataValues, GameEvent, GameMode, ItemStack, LpVec3,
+    SOUND_SOURCE_NEUTRAL, SetEntityData, SetEntityMotion, TakeItemEntity, text,
 };
 use rand::Rng;
 use uuid::Uuid;
@@ -20,8 +21,36 @@ use super::tracker::{Pose, Tracker};
 use super::{Encoded, EntityState, Game, Outbound};
 use crate::data::Aabb;
 
-/// `AbstractArrow.IN_GROUND`, after `ID_FLAGS` (8) and `PIERCE_LEVEL` (9).
+/// `AbstractArrow.ID_FLAGS` (0x01 critical) and `IN_GROUND`, with
+/// `PIERCE_LEVEL` (9) between them.
+const FLAGS: u8 = 8;
 const IN_GROUND: u8 = 10;
+/// Ticks a stuck arrow quivers and cannot be picked up (`shakeTime`).
+const SHAKE: u32 = 7;
+/// `ClientboundGameEventPacket.PLAY_ARROW_HIT_SOUND`, for the shooter.
+const ARROW_HIT_PLAYER: u8 = 6;
+
+/// Who may pick an arrow up (`AbstractArrow.Pickup`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pickup {
+    Disallowed,
+    Allowed,
+    /// Shot in creative: only a creative player takes it, and gets nothing.
+    CreativeOnly,
+}
+
+/// An arrow about to be shot.
+pub struct Shot {
+    pub owner: Option<i32>,
+    pub from: [f64; 3],
+    pub direction: [f64; 3],
+    /// Blocks a tick.
+    pub speed: f64,
+    pub inaccuracy: f64,
+    pub base_damage: f64,
+    pub crit: bool,
+    pub pickup: Pickup,
+}
 /// Seen up to 4 chunks away, updated once a second.
 const RANGE: f64 = 4.0 * 16.0;
 const UPDATE_INTERVAL: u32 = 20;
@@ -43,8 +72,11 @@ pub struct Arrow {
     yaw: f32,
     pitch: f32,
     base_damage: f64,
+    crit: bool,
+    pickup: Pickup,
     /// Where it sticks, and the block it sticks in.
     stuck: Option<(BlockPos, u32)>,
+    shake: u32,
     life: u32,
     tracker: Tracker,
     sent_velocity: [f64; 3],
@@ -78,20 +110,35 @@ impl Arrow {
             velocity: self.sent_velocity,
             // `Projectile.getAddEntityPacket`: the shooter.
             object_data: self.owner.unwrap_or(0),
-            data: if self.stuck.is_some() {
-                vec![EntityDataValue {
-                    index: IN_GROUND,
-                    value: EntityData::Boolean(true),
-                }]
-            } else {
-                Vec::new()
-            },
+            data: self
+                .data()
+                .into_iter()
+                .filter(|v| v.value != EntityData::Byte(0) && v.value != EntityData::Boolean(false))
+                .collect(),
             equipment: Vec::new(),
             spectator: false,
             range: RANGE,
         });
         self.state = Some(Arc::clone(&state));
         state
+    }
+
+    fn data(&self) -> Vec<EntityDataValue> {
+        vec![
+            EntityDataValue {
+                index: FLAGS,
+                value: EntityData::Byte(u8::from(self.crit)),
+            },
+            EntityDataValue {
+                index: IN_GROUND,
+                value: EntityData::Boolean(self.stuck.is_some()),
+            },
+        ]
+    }
+
+    fn bounds(&self) -> Aabb {
+        let [x, y, z] = self.pos;
+        [x - 0.25, y, z - 0.25, x + 0.25, y + 0.5, z + 0.25]
     }
 
     /// `Projectile.updateRotation`: pointing where it flies.
@@ -125,15 +172,17 @@ impl Game {
 
     /// `Projectile.shoot`: off towards `direction` at `speed` blocks a tick,
     /// scattered by `inaccuracy`.
-    pub(super) fn shoot_arrow(
-        &mut self,
-        owner: Option<i32>,
-        from: [f64; 3],
-        direction: [f64; 3],
-        speed: f64,
-        inaccuracy: f64,
-        base_damage: f64,
-    ) {
+    pub(super) fn shoot_arrow(&mut self, shot: Shot) {
+        let Shot {
+            owner,
+            from,
+            direction,
+            speed,
+            inaccuracy,
+            base_damage,
+            crit,
+            pickup,
+        } = shot;
         let mut rng = rand::rng();
         let length = direction
             .iter()
@@ -154,7 +203,10 @@ impl Game {
             yaw: 0.0,
             pitch: 0.0,
             base_damage,
+            crit,
+            pickup,
             stuck: None,
+            shake: 0,
             life: 0,
             tracker: Tracker::new(
                 &Pose {
@@ -219,9 +271,11 @@ impl Game {
                 arrow.data_dirty = true;
             } else {
                 arrow.life += 1;
+                arrow.shake = arrow.shake.saturating_sub(1);
                 if arrow.life >= LIFETIME {
                     return self.remove_arrow(entity_id);
                 }
+                self.pick_up_arrow(entity_id);
                 return self.sync_arrow(entity_id);
             }
         }
@@ -272,6 +326,9 @@ impl Game {
                 ];
                 arrow.velocity = [0.0; 3];
                 arrow.stuck = Some((hit.block, world.block(hit.block)));
+                arrow.shake = SHAKE;
+                arrow.crit = false;
+                arrow.life = 0;
                 arrow.data_dirty = true;
                 let at = arrow.pos;
                 let pitch = 1.2 / (rand::rng().random::<f32>() * 0.2 + 0.9);
@@ -316,14 +373,24 @@ impl Game {
             return;
         };
         let speed = arrow.velocity.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let damage = (speed * arrow.base_damage)
+        let mut damage = (speed * arrow.base_damage)
             .clamp(0.0, f64::from(i32::MAX))
-            .ceil() as f32;
+            .ceil() as i32;
+        if arrow.crit {
+            damage += rand::rng().random_range(0..damage / 2 + 2);
+        }
+        let damage = damage as f32;
         let (owner, at) = (arrow.owner, arrow.pos);
         let hurt = if self.mobs.contains_key(&victim) {
-            self.hurt_mob(victim, damage, Some((entity_id, at)), "minecraft:arrow")
+            self.hurt_mob_by(
+                victim,
+                damage,
+                owner,
+                Some((entity_id, at)),
+                "minecraft:arrow",
+            )
         } else if let Some(player) = self.players.get(&victim) {
-            let shooter = owner.and_then(|o| self.mob_name(o));
+            let shooter = owner.and_then(|o| self.entity_name(o));
             let message = text::translate(
                 "death.attack.arrow",
                 std::iter::once(text::player_name(player.name(), player.uuid()))
@@ -346,6 +413,15 @@ impl Game {
             false
         };
         if hurt {
+            // The shooter hears it when a player is hit.
+            if self.players.contains_key(&victim)
+                && let Some(shooter) = owner.and_then(|o| self.players.get(&o))
+            {
+                shooter.send(Outbound::Packet(Arc::new(Encoded::new(&GameEvent {
+                    event: ARROW_HIT_PLAYER,
+                    param: 0.0,
+                }))));
+            }
             let pitch = 1.2 / (rand::rng().random::<f32>() * 0.2 + 0.9);
             self.play_sound_from(
                 None,
@@ -361,6 +437,66 @@ impl Game {
             arrow.yaw += 180.0;
             self.sync_arrow(entity_id);
         }
+    }
+
+    /// `AbstractArrow.playerTouch`: a stuck arrow that has stopped quivering
+    /// goes to a player who touches it, if it may.
+    fn pick_up_arrow(&mut self, entity_id: i32) {
+        let Some(arrow) = self.arrows.get(&entity_id) else {
+            return;
+        };
+        if arrow.shake > 0 || arrow.pickup == Pickup::Disallowed {
+            return;
+        }
+        let bounds = arrow.bounds();
+        let pickup = arrow.pickup;
+        let Some(taker) = self
+            .players
+            .values()
+            .filter(|p| !p.dead && p.game_mode() != GameMode::Spectator)
+            .filter(|p| pickup == Pickup::Allowed || p.game_mode() == GameMode::Creative)
+            .find(|p| {
+                let b = p.bounds();
+                let reach = [
+                    b[0] - 1.0,
+                    b[1] - 0.5,
+                    b[2] - 1.0,
+                    b[3] + 1.0,
+                    b[4] + 0.5,
+                    b[5] + 1.0,
+                ];
+                (0..3).all(|i| reach[i] < bounds[i + 3] && reach[i + 3] > bounds[i])
+            })
+            .map(|p| p.entity_id)
+        else {
+            return;
+        };
+        if pickup == Pickup::Allowed {
+            let Some(item) = self.context.data.item_id("minecraft:arrow") else {
+                return;
+            };
+            let stack = ItemStack {
+                item,
+                count: 1,
+                patch: Default::default(),
+            };
+            let mut leftover = None;
+            let mut changed = Vec::new();
+            self.update_inventory(taker, |inventory| {
+                (leftover, changed) = inventory.add(stack, 64);
+            });
+            if leftover.is_some() {
+                return;
+            }
+            self.send_slots(taker, &changed);
+        }
+        let take = Encoded::new(&TakeItemEntity {
+            item_id: entity_id,
+            player_id: taker,
+            amount: 1,
+        });
+        self.broadcast(None, &Outbound::Packet(Arc::new(take)));
+        self.remove_arrow(entity_id);
     }
 
     fn sync_arrow(&mut self, entity_id: i32) {
@@ -381,10 +517,7 @@ impl Game {
         if dirty {
             packets.push(Encoded::new(&SetEntityData {
                 entity_id,
-                values: EntityDataValues(vec![EntityDataValue {
-                    index: IN_GROUND,
-                    value: EntityData::Boolean(arrow.stuck.is_some()),
-                }]),
+                values: EntityDataValues(arrow.data()),
             }));
         }
         if !packets.is_empty() {

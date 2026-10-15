@@ -38,8 +38,8 @@ use crate::world::{MIN_Y, World};
 const SHEEP_WOOL: u8 = 18;
 /// `Mob.DATA_MOB_FLAGS_ID`: 0x04 aggressive, arms up.
 const MOB_FLAGS: u8 = 15;
-/// `Zombie.DATA_BABY_ID`.
-const ZOMBIE_BABY: u8 = 16;
+/// `Zombie.DATA_BABY_ID` and, for animals, `AgeableMob.DATA_BABY_ID`.
+const BABY: u8 = 16;
 /// `Creeper.DATA_SWELL_DIR` and `DATA_IS_IGNITED`.
 const CREEPER_SWELL_DIR: u8 = 16;
 const CREEPER_IGNITED: u8 = 18;
@@ -61,6 +61,8 @@ const JUMP: f64 = 0.42;
 const STEP_HEIGHT: f64 = 0.6;
 /// `Attributes.SAFE_FALL_DISTANCE`.
 const SAFE_FALL: f64 = 3.0;
+/// `AgeableMob.BABY_START_AGE`: twenty minutes to grow up.
+const BABY_AGE: i32 = -24000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -250,8 +252,15 @@ pub struct Mob {
     sheared: bool,
     /// Chickens: ticks to the next egg.
     egg_in: u32,
-    /// Zombies: a small, fast one.
+    /// Half the size; baby zombies are faster too.
     baby: bool,
+    /// Animals: below zero a baby growing up, above zero an adult resting
+    /// after breeding (`AgeableMob.age`).
+    age: i32,
+    /// Ticks left in love, who fed it, how long it has been with a partner.
+    in_love: i32,
+    love_cause: Option<i32>,
+    love_time: i32,
     /// Ticks left burning (`remainingFireTicks`).
     fire: i32,
     fall_distance: f64,
@@ -347,6 +356,10 @@ impl Mob {
             sheared: false,
             egg_in: rng.random_range(6000..12000),
             baby: false,
+            age: 0,
+            in_love: 0,
+            love_cause: None,
+            love_time: 0,
             fire: 0,
             fall_distance: 0.0,
             target: None,
@@ -383,14 +396,29 @@ impl Mob {
         })
     }
 
-    /// A baby zombie: half the size, half again as fast
-    /// (`Zombie.setBaby`).
+    /// A baby: half the size (`getAgeScale`); a baby zombie is half
+    /// again as fast (`Zombie.setBaby`). Animals start at the age of a
+    /// newborn.
     fn make_baby(&mut self) {
-        self.baby = true;
-        self.half_width /= 2.0;
-        self.height /= 2.0;
-        self.eye_height /= 2.0;
-        self.movement_speed *= 1.5;
+        self.set_baby(true);
+        if !self.kind.hostile() {
+            self.age = BABY_AGE;
+        }
+    }
+
+    fn set_baby(&mut self, baby: bool) {
+        if baby == self.baby {
+            return;
+        }
+        let factor = if baby { 0.5 } else { 2.0 };
+        self.baby = baby;
+        self.half_width *= factor;
+        self.height *= factor;
+        self.eye_height *= factor;
+        if self.kind == Kind::Zombie {
+            self.movement_speed *= if baby { 1.5 } else { 1.0 / 1.5 };
+        }
+        self.data_dirty = true;
     }
 
     pub fn bounds(&self) -> Aabb {
@@ -463,13 +491,16 @@ impl Mob {
             let flags = if self.aggressive() { 0x04 } else { 0 };
             push(MOB_FLAGS, EntityData::Byte(flags), flags != 0);
         }
+        if !self.kind.hostile() {
+            push(BABY, EntityData::Boolean(self.baby), self.baby);
+        }
         match self.kind {
             Kind::Sheep => push(
                 SHEEP_WOOL,
                 EntityData::Byte(self.wool | if self.sheared { 0x10 } else { 0 }),
                 true,
             ),
-            Kind::Zombie => push(ZOMBIE_BABY, EntityData::Boolean(self.baby), self.baby),
+            Kind::Zombie => push(BABY, EntityData::Boolean(self.baby), self.baby),
             Kind::Creeper => {
                 push(
                     CREEPER_SWELL_DIR,
@@ -1018,6 +1049,19 @@ impl Game {
         from: Option<(i32, [f64; 3])>,
         damage_type: &str,
     ) -> bool {
+        self.hurt_mob_by(entity_id, amount, from.map(|(id, _)| id), from, damage_type)
+    }
+
+    /// [`hurt_mob`](Self::hurt_mob) with someone to blame besides what hit
+    /// it: the shooter of an arrow, who lit the TNT.
+    pub(super) fn hurt_mob_by(
+        &mut self,
+        entity_id: i32,
+        amount: f32,
+        attacker: Option<i32>,
+        from: Option<(i32, [f64; 3])>,
+        damage_type: &str,
+    ) -> bool {
         let data = Arc::clone(&self.context.data);
         let source_type = data
             .registry_id("minecraft:damage_type", damage_type)
@@ -1027,9 +1071,7 @@ impl Game {
             "minecraft:bypasses_armor",
             source_type,
         );
-        let by_player = from
-            .map(|(id, _)| id)
-            .filter(|id| self.players.contains_key(id));
+        let by_player = attacker.filter(|id| self.players.contains_key(id));
         let tick = self.tick;
         let Some(mob) = self.mobs.get_mut(&entity_id) else {
             return false;
@@ -1078,7 +1120,7 @@ impl Game {
         let damage = Encoded::new(&DamageEvent {
             entity_id,
             source_type,
-            cause: from.map(|(id, _)| id),
+            cause: attacker,
             direct: from.map(|(id, _)| id),
             source_pos: None,
         });
@@ -1114,6 +1156,9 @@ impl Game {
             .filter(|&(_, at)| tick.saturating_sub(at) < PLAYER_MEMORY)
             .map(|(p, _)| p));
         let experience = mob.experience(&mut rand::rng());
+        // `shouldDropLoot` and `shouldDropExperience`: baby animals leave
+        // nothing; monsters always do.
+        let leaves = !(mob.baby && !mob.kind.hostile());
         let death = Encoded::new(&EntityEvent {
             entity_id,
             event: 3,
@@ -1136,6 +1181,9 @@ impl Game {
             explosion: None,
         }
         .drops(&mut rand::rng());
+        if !leaves {
+            return;
+        }
         for stack in drops {
             self.spawn_item([pos[0], pos[1] + 0.5, pos[2]], [0.0, 0.2, 0.0], stack, 10);
         }
@@ -1187,6 +1235,17 @@ impl Game {
             .filter(|m| m.alive())
             .map(|m| (m.entity_id, m.bounds()))
             .collect()
+    }
+
+    /// The name of a player or mob for death messages.
+    pub(super) fn entity_name(&self, entity_id: i32) -> Option<Nbt> {
+        match self.players.get(&entity_id) {
+            Some(player) => Some(ferrocraft_protocol::packets::play::text::player_name(
+                player.name(),
+                player.uuid(),
+            )),
+            None => self.mob_name(entity_id),
+        }
     }
 
     /// Where a mob's eyes are.

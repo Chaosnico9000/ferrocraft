@@ -7,6 +7,23 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
 
 ### Neu
 
+- Bogen: Rechtsklick spannt, Loslassen schießt; die Kraft hängt von der
+  Spannzeit ab, voll gespannt fliegen kritische Pfeile mit Zufallsbonus. Im
+  Überlebensmodus braucht er Pfeile, verbraucht einen pro Schuss und nutzt
+  sich ab. Steckende Pfeile lassen sich wieder aufsammeln, wer getroffen wird,
+  weiß, von wem; der Schütze hört den Treffer.
+- TNT: mit Feuerzeug oder Feuerkugel gezündet, hüpft es hoch und explodiert
+  nach vier Sekunden mit Stärke 4. Die Blöcke lassen dabei alles fallen (kein
+  Verfall wie bei Creepern), anderes TNT in der Nähe geht mit kurzer Lunte
+  hoch, Mobs und TNT werden weggeschleudert. Wer es gezündet hat, gilt als
+  Täter.
+- Züchten: Tiere mit ihrem Futter füttern (Weizen, Karotten, Samen …) macht
+  sie verliebt (Herzen); zwei verliebte finden sich und bekommen ein Junges
+  in halber Größe, dazu Erfahrung. Die Eltern brauchen fünf Minuten Pause,
+  Junge wachsen in zwanzig Minuten heran (Füttern beschleunigt), folgen den
+  Großen und lassen beim Tod nichts fallen. Lämmer bekommen die
+  Mischfarbe ihrer Eltern nach Vanillas Farbrezepten. Jede zwanzigste Kuh,
+  jedes zwanzigste Schaf usw. einer neuen Herde ist ein Junges.
 - Monster: Zombies, Skelette, Creeper und Spinnen spawnen nach Vanillas
   Regeln im Dunkeln (Licht, Obergrenze je Spieler, Gewichte der Ebene),
   verschwinden fern der Spieler und im Friedlich-Modus. Sie suchen sich
@@ -91,6 +108,8 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
 
 ### Behoben
 
+- Wer von einem Creeper in die Luft gesprengt wurde, bekam eine
+  Todesmeldung ohne den Creeper: er verschwand vor seiner Explosion.
 - Vanilla-Welten luden Chunks, die Vanilla nur angefangen hatte zu erzeugen,
   als fertig: Um den erkundeten Bereich herum fehlte dann der Boden, und der
   Start dauerte lange (900 Chunks, 16 s). Solche Chunks werden jetzt

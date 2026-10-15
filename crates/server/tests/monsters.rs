@@ -167,7 +167,13 @@ async fn creepers_blow_up_next_to_players() {
     assert_eq!(blast.radius, 3.0);
     assert!(blast.block_count > 0 && holes > 0);
     assert!(blast.knockback.is_some(), "Alex is thrown");
-    assert!(removed, "the creeper is gone with the blast");
+    // The creeper goes with its blast, named in the death message first.
+    if !removed {
+        read_matching(&mut alex, |r: &RemoveEntities| {
+            r.entity_ids.0.contains(&creeper.entity_id)
+        })
+        .await;
+    }
     assert_eq!(hurt.expect("Alex is hurt").cause, Some(creeper.entity_id));
 }
 

@@ -12,8 +12,10 @@ use rand::Rng;
 use super::animal::{face, look_around, random_spot, turn_head};
 use super::{Goal, Kind, Look, Mob, block_at, can_see_sky};
 use crate::game::Game;
+use crate::game::explosion::Blast;
 use crate::game::physics;
-use crate::game::survival::Hit;
+use crate::game::projectile::{Pickup, Shot};
+use crate::game::survival::{Hit, bow_power};
 
 /// `Mob.DEFAULT_ATTACK_REACH`: a melee hit lands when the attacker's box,
 /// this much wider, touches the target's.
@@ -408,14 +410,16 @@ impl Game {
             1.0,
             1.0 / (rng.random::<f32>() * 0.4 + 0.8),
         );
-        self.shoot_arrow(
-            Some(entity_id),
+        self.shoot_arrow(Shot {
+            owner: Some(entity_id),
             from,
-            [dx, dy + horizontal * 0.2, dz],
-            1.6,
+            direction: [dx, dy + horizontal * 0.2, dz],
+            speed: 1.6,
             inaccuracy,
             base_damage,
-        );
+            crit: false,
+            pickup: Pickup::Disallowed,
+        });
     }
 
     /// After moving: the sun burns the undead, creepers burn their fuse.
@@ -469,9 +473,17 @@ impl Game {
                 return;
             };
             let at = mob.pos;
-            // `Creeper.explodeCreeper`: the blast takes the creeper with it.
+            // `Creeper.explodeCreeper`: the blast takes the creeper with it,
+            // after naming it in the death messages.
+            self.explode(Blast {
+                center: at,
+                radius: CREEPER_BLAST,
+                source: Some(entity_id),
+                attacker: Some(entity_id),
+                breaks_blocks: true,
+                decay: true,
+            });
             self.remove_mob(entity_id);
-            self.explode(at, CREEPER_BLAST, Some(entity_id), true);
         }
     }
 
@@ -494,12 +506,6 @@ fn lose_target(mob: &mut Mob) {
     mob.stop();
     mob.goal = Goal::Idle;
     mob.data_dirty = true;
-}
-
-/// `BowItem.getPowerForTime`.
-fn bow_power(ticks: u32) -> f32 {
-    let f = ticks as f32 / 20.0;
-    ((f * f + f * 2.0) / 3.0).min(1.0)
 }
 
 /// `RandomSource.triangle`: around `mean`, at most `spread` off.

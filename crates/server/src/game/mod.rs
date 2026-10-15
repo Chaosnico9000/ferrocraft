@@ -21,6 +21,7 @@ mod physics;
 mod player;
 mod projectile;
 mod survival;
+mod tnt;
 mod tracker;
 
 pub use command::{OPERATOR, parse_difficulty, parse_mode, tree as command_tree};
@@ -360,6 +361,7 @@ struct Game {
     items: HashMap<i32, item::ItemEntity>,
     mobs: HashMap<i32, mob::Mob>,
     arrows: HashMap<i32, projectile::Arrow>,
+    tnts: HashMap<i32, tnt::PrimedTnt>,
     orbs: HashMap<i32, orb::Orb>,
     /// Entities of chunks no player is near, and those Ferrocraft cannot
     /// run, kept for saving.
@@ -412,6 +414,7 @@ impl Game {
             items: HashMap::new(),
             mobs: HashMap::new(),
             arrows: HashMap::new(),
+            tnts: HashMap::new(),
             orbs: HashMap::new(),
             stored: std::mem::take(&mut context.entities),
             foreign: HashMap::new(),
@@ -454,6 +457,7 @@ impl Game {
             self.tick_items();
             self.tick_mobs();
             self.tick_arrows();
+            self.tick_tnt();
             self.tick_orbs();
             self.tick_furnaces();
             self.send_light_updates();
@@ -1107,10 +1111,12 @@ impl Game {
     }
 
     /// Everything thrown or dropped that a new player should see besides
-    /// items and mobs: arrows and experience orbs.
+    /// items and mobs: arrows, experience orbs and lit TNT.
     fn projectile_states(&mut self) -> Vec<Arc<EntityState>> {
-        let arrows = self.arrow_states();
-        arrows.into_iter().chain(self.orb_states()).collect()
+        let mut states = self.arrow_states();
+        states.extend(self.orb_states());
+        states.extend(self.tnt_states());
+        states
     }
 
     /// Vanilla's rule (`ServerCommonPacketListenerImpl.keepConnectionAlive`):

@@ -40,6 +40,15 @@ fn use_remainder(item: &str) -> Option<&'static str> {
     }
 }
 
+/// `BowItem.getUseDuration`: a bow can be held drawn for an hour.
+const BOW_USE_TICKS: u32 = 72000;
+
+/// `BowItem.getPowerForTime`: full power after a second of drawing.
+pub(super) fn bow_power(ticks: u32) -> f32 {
+    let f = ticks as f32 / 20.0;
+    ((f * f + f * 2.0) / 3.0).min(1.0)
+}
+
 /// Modes in which the player has a body that can starve, fall and die.
 fn mortal(mode: GameMode) -> bool {
     matches!(mode, GameMode::Survival | GameMode::Adventure)
@@ -552,7 +561,10 @@ impl Game {
         // `DamageScaling`: explosions always, the rest when a mob is to
         // blame.
         let by_mob = hit.attacker.is_some_and(|a| !self.players.contains_key(&a));
-        let scales = hit.damage_type == "minecraft:explosion" || by_mob;
+        let scales = matches!(
+            hit.damage_type,
+            "minecraft:explosion" | "minecraft:player_explosion"
+        ) || by_mob;
         let difficulty = self.context.difficulty;
         let Some(player) = self.players.get(&entity_id) else {
             return false;
@@ -751,11 +763,12 @@ impl Game {
 
     // --- Eating ------------------------------------------------------------
 
-    /// `use_item`: starts eating what is in hand, if the player may.
+    /// `use_item`: starts eating what is in hand, or drawing a bow, if the
+    /// player may.
     pub(super) fn use_item(&mut self, entity_id: i32, hand: i32, sequence: i32) {
         self.finish_block_action(entity_id, sequence, &[]);
-        let data = &self.context.data;
-        let Some(player) = self.players.get_mut(&entity_id) else {
+        let data = Arc::clone(&self.context.data);
+        let Some(player) = self.players.get(&entity_id) else {
             return;
         };
         if player.dead || player.game_mode() == GameMode::Spectator {
@@ -772,25 +785,134 @@ impl Game {
         let Some(item) = data.item(stack.item) else {
             return;
         };
-        let Some(food) = &item.food else {
+        let ticks = if item.name == "minecraft:bow" {
+            // `BowItem.use`: only with arrows, unless in creative.
+            if player.game_mode() != GameMode::Creative && self.arrow_slot(entity_id).is_none() {
+                return;
+            }
+            BOW_USE_TICKS
+        } else {
+            let Some(food) = &item.food else {
+                return;
+            };
+            // `Player.canEat`.
+            let may_eat =
+                !mortal(player.game_mode()) || food.can_always_eat || player.food.level < 20;
+            if !may_eat {
+                return;
+            }
+            (item.consume_seconds.unwrap_or(1.6) * 20.0)
+                .round()
+                .max(1.0) as u32
+        };
+        let item = stack.item;
+        let Some(player) = self.players.get_mut(&entity_id) else {
             return;
         };
-        // `Player.canEat`.
-        let may_eat = !mortal(player.game_mode()) || food.can_always_eat || player.food.level < 20;
-        if !may_eat {
-            return;
-        }
-        let ticks = (item.consume_seconds.unwrap_or(1.6) * 20.0)
-            .round()
-            .max(1.0) as u32;
         player.using = Some(Using {
             hand,
             slot,
-            item: stack.item,
+            item,
             ticks_left: ticks,
         });
         player.data_dirty = true;
         player.state = None;
+    }
+
+    /// The slot of the arrows a bow shoots (`Player.getProjectile`): in a
+    /// hand first, then the inventory from the hotbar on.
+    fn arrow_slot(&self, entity_id: i32) -> Option<usize> {
+        let player = self.players.get(&entity_id)?;
+        let data = &self.context.data;
+        let is_arrow = |slot: usize| {
+            player
+                .inventory
+                .get(slot)
+                .and_then(|s| data.item(s.item))
+                .is_some_and(|i| {
+                    matches!(
+                        i.name.as_str(),
+                        "minecraft:arrow" | "minecraft:spectral_arrow" | "minecraft:tipped_arrow"
+                    )
+                })
+        };
+        [inventory::OFF_HAND, player.inventory.selected_slot()]
+            .into_iter()
+            .chain(36..45)
+            .chain(9..36)
+            .find(|&slot| is_arrow(slot))
+    }
+
+    /// Letting go of the use button: a drawn bow shoots
+    /// (`BowItem.releaseUsing`), anything else just stops.
+    pub(super) fn release_using(&mut self, entity_id: i32) {
+        let data = Arc::clone(&self.context.data);
+        let Some(player) = self.players.get(&entity_id) else {
+            return;
+        };
+        let Some(using) = player.using else {
+            return;
+        };
+        let bow = data
+            .item(using.item)
+            .is_some_and(|i| i.name == "minecraft:bow");
+        let creative = player.game_mode() == GameMode::Creative;
+        self.stop_using(entity_id);
+        if !bow {
+            return;
+        }
+        let held = BOW_USE_TICKS - using.ticks_left;
+        let power = bow_power(held);
+        let ammo = self.arrow_slot(entity_id);
+        if power < 0.1 || (ammo.is_none() && !creative) {
+            return;
+        }
+        let Some(player) = self.players.get(&entity_id) else {
+            return;
+        };
+        let (yaw, pitch) = (
+            f64::from(player.yaw).to_radians(),
+            f64::from(player.pitch).to_radians(),
+        );
+        let eyes = player.eyes();
+        let at = player.pos;
+        self.shoot_arrow(super::projectile::Shot {
+            owner: Some(entity_id),
+            from: [eyes[0], eyes[1] - 0.1, eyes[2]],
+            // `Projectile.shootFromRotation`.
+            direction: [
+                -yaw.sin() * pitch.cos(),
+                -pitch.sin(),
+                yaw.cos() * pitch.cos(),
+            ],
+            speed: f64::from(power) * 3.0,
+            inaccuracy: 1.0,
+            base_damage: 2.0,
+            crit: power >= 1.0,
+            pickup: if creative {
+                super::projectile::Pickup::CreativeOnly
+            } else {
+                super::projectile::Pickup::Allowed
+            },
+        });
+        let pitch = 1.0 / (rand::random::<f32>() * 0.4 + 1.2) + power * 0.5;
+        self.play_sound_from(
+            None,
+            "minecraft:entity.arrow.shoot",
+            at,
+            ferrocraft_protocol::packets::play::SOUND_SOURCE_PLAYERS,
+            1.0,
+            pitch,
+        );
+        if !creative {
+            if let Some(ammo) = ammo {
+                self.update_inventory(entity_id, |inventory| {
+                    inventory.take(ammo, 1);
+                });
+                self.send_slots(entity_id, &[ammo]);
+            }
+            self.wear(entity_id, using.slot, 1);
+        }
     }
 
     pub(super) fn stop_using(&mut self, entity_id: i32) {
@@ -823,6 +945,10 @@ impl Game {
         let Some(item) = data.item(using.item) else {
             return self.stop_using(entity_id);
         };
+        if item.food.is_none() {
+            // A bow held for the full hour simply stays drawn.
+            return self.stop_using(entity_id);
+        }
         if let Some(food) = &item.food {
             // `FoodData.add`.
             let level = (player.food.level + food.nutrition).clamp(0, 20);

@@ -152,3 +152,10 @@ Minecraft-Server (Java Edition 26.3) in Rust. Was er kann und der Aufbau stehen 
 - **Tests mit mehreren Entities** dürfen sich nicht auf die Reihenfolge der
   `add_entity` verlassen, und Werte, die im selben Tick kommen
   (`container_set_data`), kommen in Index-Reihenfolge.
+- **Der Test-Client überspringt, was er nicht dekodieren kann**: Items mit
+  Komponenten wie `damage` scheitern beim Dekodieren, und `read_until`
+  wartet dann still weiter, bis der Keep-Alive die Verbindung beendet (nach
+  30 s). Solche Pakete roh lesen und nur die vorderen Felder prüfen.
+- **Bogen**: Der Client meldet das Loslassen als `player_action`
+  RELEASE_USE (6); die Spannzeit zählt der Server selbst. Gezündetes TNT
+  trägt die Lunte als Entity-Daten 8 (Int), der Client zählt sie herunter.

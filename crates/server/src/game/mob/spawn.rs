@@ -230,7 +230,17 @@ impl Game {
                 if !self.spawnable(category, chosen, pos, &mut rng) {
                     continue;
                 }
-                if self.spawn_mob(chosen, at).is_some() {
+                if let Some(id) = self.spawn_mob(chosen, at) {
+                    // `AgeableMob.finalizeSpawn`: after the first of a herd,
+                    // one in twenty is a baby.
+                    if !chosen.hostile()
+                        && group > 0
+                        && rng.random::<f32>() <= 0.05
+                        && let Some(mob) = self.mobs.get_mut(&id)
+                    {
+                        mob.make_baby();
+                        mob.state = None;
+                    }
                     spawned.push((chosen, at));
                     group += 1;
                     // `getMaxSpawnClusterSize`: four at most.

@@ -198,6 +198,9 @@ impl Game {
         if !matches!(mode, GameMode::Creative | GameMode::Survival) {
             return self.finish_block_action(entity_id, click.sequence, &refresh);
         }
+        if self.light_tnt(entity_id, click) {
+            return self.finish_block_action(entity_id, click.sequence, &refresh);
+        }
         let changed = self.place(entity_id, click, face);
         let mut refresh = refresh.to_vec();
         refresh.extend(changed);
@@ -628,7 +631,7 @@ impl Game {
             player_action::ABORT_DESTROY_BLOCK => {
                 self.abort_digging(entity_id, action.pos, action.sequence);
             }
-            player_action::RELEASE_USE_ITEM => self.stop_using(entity_id),
+            player_action::RELEASE_USE_ITEM => self.release_using(entity_id),
             player_action::DROP_ITEM | player_action::DROP_ALL_ITEMS => {
                 if mode == GameMode::Spectator || player.dead {
                     return;

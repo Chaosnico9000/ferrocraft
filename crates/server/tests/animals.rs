@@ -170,3 +170,51 @@ async fn players_hurt_each_other_in_survival() {
     .await;
     assert!(push.velocity.0[1] > 0.0);
 }
+
+#[tokio::test]
+async fn fed_cows_have_a_calf() {
+    let data = GameData::load().unwrap();
+    let (cow_type, _) = data.entity("minecraft:cow").unwrap();
+    let orb_type = data.entity_type("minecraft:experience_orb").unwrap();
+    let addr = start(operators()).await;
+    let (mut alex, _) = join(addr, "Alex", 2).await;
+    run(&mut alex, "summon cow 2 -60 0").await;
+    run(&mut alex, "summon cow 3 -60 1").await;
+    let first = read_matching(&mut alex, |a: &AddEntity| a.entity_type == cow_type).await;
+    let second = read_matching(&mut alex, |a: &AddEntity| a.entity_type == cow_type).await;
+    hold_some(&mut alex, data.item_id("minecraft:wheat").unwrap(), 2).await;
+    for cow in [&first, &second] {
+        alex.send(&Interact {
+            entity_id: cow.entity_id,
+            hand: 0,
+            location: LpVec3([0.0, 0.5, 0.0]),
+            sneaking: false,
+        })
+        .await;
+        // Hearts.
+        read_matching(&mut alex, |e: &EntityEvent| {
+            e.entity_id == cow.entity_id && e.event == 18
+        })
+        .await;
+    }
+    // After three seconds together, a calf with experience for it.
+    let calf = tokio::time::timeout(
+        Duration::from_secs(10),
+        read_matching(&mut alex, |a: &AddEntity| {
+            a.entity_type == cow_type
+                && a.entity_id != first.entity_id
+                && a.entity_id != second.entity_id
+        }),
+    )
+    .await
+    .expect("no calf");
+    let baby = read_matching(&mut alex, |d: &SetEntityData| d.entity_id == calf.entity_id).await;
+    assert!(
+        baby.values
+            .0
+            .iter()
+            .any(|v| v.index == 16 && v.value == EntityData::Boolean(true)),
+        "{baby:?}"
+    );
+    read_matching(&mut alex, |a: &AddEntity| a.entity_type == orb_type).await;
+}

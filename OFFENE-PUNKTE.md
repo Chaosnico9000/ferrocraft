@@ -7,8 +7,8 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
 
 - Weitere Mobs: Endermen, Hexen, Schleime, Zombiedorfbewohner, Pferde,
   Dorfbewohner (ihre Spawn-Anteile sind schon eingeplant, es spawnt nur nichts)
-- Tiere: Babys und Züchten, Gras fressen und Wolle nachwachsen lassen, Leinen,
-  Reiten, Varianten (warme und kalte Kühe, Schweine, Hühner)
+- Tiere: Gras fressen und Wolle nachwachsen lassen, Leinen, Reiten, Varianten
+  (warme und kalte Kühe, Schweine, Hühner), Küken aus geworfenen Eiern
 - Monster: Zombies brechen keine Türen auf und rufen keine Verstärkung, Skelette
   suchen keinen Schatten und laufen beim Schießen nicht seitwärts, keine
   Spinnenreiter, Mobs greifen sich nicht gegenseitig an, keine Rüstung und
@@ -18,8 +18,8 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
   zusammen
 - Redstone: Strom, Kolben, Beobachter, Verstärker, Komparatoren
 - Wasser und Lava fließen, Schwerkraft für Sand und Kies
-- TNT zünden (Explosionen gibt es, aber nur von Creepern); Feuer, das sich
-  ausbreitet
+- TNT durch Redstone, Feuer oder brennende Pfeile zünden; Feuer, das sich
+  ausbreitet; Feuer mit dem Feuerzeug legen
 - Wachsen: Pflanzen, Bäume, Gras und Blätter, die zerfallen
 - Wetter: Regen, Gewitter
 - Nether und Ende, Portale
@@ -31,8 +31,8 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
   beim Abbauen
 - Verzauberungen auf Rüstung; Spieler brennen nicht
 - Erfahrung aus Erzen und vom Züchten, Reparieren mit Erfahrung
-- Schaden durch Feuer, Lava, Ertrinken, Kakteen; Schild, Bogen und Armbrust
-  für Spieler (Pfeile gibt es schon, nur Skelette schießen), Dreizack
+- Schaden durch Feuer, Lava, Ertrinken, Kakteen; Schild, Armbrust, Dreizack;
+  Spektral- und Trankpfeile wirken wie normale
 - Statuseffekte, Tränke
 - Spielregeln (`gamerule`), etwa `mobGriefing` oder `keepInventory`
 
@@ -50,7 +50,9 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
   `/summon` ohne NBT, Ziele nur `@s`, `@a`, `@p`, `@r` und Namen
 - Keine Server-Konsole; Befehle gehen nur über einen Spieler (oder den Bot
   mit `--commands`)
-- Pfeile werden nicht gespeichert, stecken nicht sichtbar in Spielern
+- Pfeile und gezündetes TNT werden nicht gespeichert, Pfeile stecken nicht
+  sichtbar in Spielern; Spielerbewegung geht nicht in den Schwung der Pfeile
+  ein
 - Bewegungen werden nicht geprüft (Fliegen, Durch-Wände-Laufen im
   Überlebensmodus)
 
@@ -67,6 +69,8 @@ echter Minecraft-Client ließ sich in der Entwicklungsumgebung nicht starten.
   und Explosion der Creeper, klettern der Spinnen; Feuer auf brennenden
   Zombies; Pfeile im Flug
 - Ofenmenü: Flamme und Pfeil laufen mit, Erfahrungskugeln fliegen zum Spieler
+- Bogen: Spannen und Loslassen, Pfeile im Flug und beim Aufsammeln; TNT
+  blinkt und explodiert; Herzen beim Füttern, Jungtiere in halber Größe
 
 ## Nach Fertigstellung: Mod-Schicht für Fabric und Forge
 

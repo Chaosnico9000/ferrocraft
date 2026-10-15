@@ -18,13 +18,14 @@ geschrieben: keine Vanilla-Klassen, kein JVM-Wrapper.
 | Blöcke | Setzen und abbauen (Türen, Betten, Treppen, Doppelkisten), Türen/Falltüren/Zauntore/Hebel/Knöpfe benutzen, Licht wird neu berechnet | ✅ |
 | Block-Entities | Kisten, Fässer, Spender, Trichter, Shulker-Kisten, Endertruhe, Werkbank (Rezepte von Vanilla), Schilder beschreiben | ✅ |
 | Öfen | Ofen, Räucherofen, Hochofen: Brennstoffe und Rezepte aus Vanillas Daten, Feuer und Fortschritt im Menü, der Block glüht, Erfahrung beim Herausnehmen | ✅ |
-| Tiere | Kühe, Schweine, Schafe, Hühner: spawnen auf Gras, laufen mit Wegfindung umher, schauen Spieler an, folgen Futter, flüchten nach Treffern, Loot nach Vanillas Tabellen; Schafe scheren, Kühe melken, Hühner legen Eier; werden gespeichert | ✅ |
+| Tiere | Kühe, Schweine, Schafe, Hühner: spawnen auf Gras, laufen mit Wegfindung umher, schauen Spieler an, folgen Futter, flüchten nach Treffern, Loot nach Vanillas Tabellen; züchten mit ihrem Futter, Babys wachsen heran und folgen den Eltern (Lämmer in gemischter Farbe); Schafe scheren, Kühe melken, Hühner legen Eier; werden gespeichert | ✅ |
 | Monster | Zombies, Skelette (schießen Pfeile), Creeper (explodieren), Spinnen (klettern, springen): spawnen im Dunkeln wie bei Vanilla, jagen Spieler über Wegfindung, Zombies und Skelette brennen in der Sonne; Schwierigkeitsgrade | ✅ |
-| Kampf | Nahkampf gegen Mobs und Spieler mit Aufladung, kritischen Treffern, Rückstoß, Waffenschaden aus Vanillas Daten; Rüstung schützt und nutzt sich ab; Explosionen zerstören Blöcke | ✅ |
+| Kampf | Nahkampf gegen Mobs und Spieler mit Aufladung, kritischen Treffern, Rückstoß, Waffenschaden aus Vanillas Daten; Bogen mit Spannen, kritischen Pfeilen und Aufsammeln; Rüstung schützt und nutzt sich ab | ✅ |
+| Explosionen | Creeper und TNT (mit Feuerzeug oder Feuerkugel zünden, Kettenreaktionen): Blöcke nach Explosionsfestigkeit, Schaden und Rückstoß nach Deckung | ✅ |
 | Erfahrung | Kugeln von Mobs und Öfen fliegen zum Spieler, Level wie bei Vanilla, beim Tod fällt ein Teil heraus | ✅ |
 | Befehle | `/list`, `/gamemode`, `/time`, `/tp`, `/give`, `/kill`, `/summon`, `/difficulty`, `/experience` (`/xp`) (alle außer `/list` für Operatoren) | ✅ |
 | Welt | Speichern im Vanilla-Format samt `level.dat` und Entities, Vanilla-Welten laden | ✅ |
-| Fehlt | Braustände, Redstone, Wasser und Lava fließen, Verzauberungen, Züchten, Bogen für Spieler; alles in [`OFFENE-PUNKTE.md`](OFFENE-PUNKTE.md), auch die geplante Schicht für Fabric- und Forge-Mods | ⏳ |
+| Fehlt | Braustände, Redstone, Wasser und Lava fließen, Verzauberungen, Armbrust; alles in [`OFFENE-PUNKTE.md`](OFFENE-PUNKTE.md), auch die geplante Schicht für Fabric- und Forge-Mods | ⏳ |
 
 Wer sich verbindet, steht in einer endlosen Superflat-Welt (Grundgestein, zwei
 Lagen Erde, Gras), im Überlebensmodus oder in dem Modus aus `game_mode`, sieht
