@@ -17,11 +17,14 @@ geschrieben: keine Vanilla-Klassen, kein JVM-Wrapper.
 | Items | Fallen lassen (Q, Strg+Q, aus dem Inventar), aufsammeln, Mittelklick, Inventar-Klicks wie Vanilla (Ziehen, Shift, Zahlentasten, Doppelklick) | ✅ |
 | Blöcke | Setzen und abbauen (Türen, Betten, Treppen, Doppelkisten), Türen/Falltüren/Zauntore/Hebel/Knöpfe benutzen, Licht wird neu berechnet | ✅ |
 | Block-Entities | Kisten, Fässer, Spender, Trichter, Shulker-Kisten, Endertruhe, Werkbank (Rezepte von Vanilla), Schilder beschreiben | ✅ |
-| Tiere | Kühe, Schweine, Schafe, Hühner: spawnen auf Gras, laufen umher, schauen Spieler an, folgen Futter, flüchten nach Treffern, Loot nach Vanillas Tabellen; Schafe scheren, Kühe melken, Hühner legen Eier | ✅ |
-| Kampf | Nahkampf gegen Tiere und Spieler mit Aufladung, kritischen Treffern, Rückstoß, Waffenschaden aus Vanillas Daten | ✅ |
-| Befehle | `/list`, `/gamemode`, `/time`, `/tp`, `/give`, `/kill`, `/summon` (die letzten für Operatoren) | ✅ |
-| Welt | Speichern im Vanilla-Format samt `level.dat`, Vanilla-Welten laden | ✅ |
-| Fehlt | Feindliche Mobs, Öfen und Braustände, Redstone, Wasser und Lava fließen, Verzauberungen, Explosionen; alles in [`OFFENE-PUNKTE.md`](OFFENE-PUNKTE.md), auch die geplante Schicht für Fabric- und Forge-Mods | ⏳ |
+| Öfen | Ofen, Räucherofen, Hochofen: Brennstoffe und Rezepte aus Vanillas Daten, Feuer und Fortschritt im Menü, der Block glüht, Erfahrung beim Herausnehmen | ✅ |
+| Tiere | Kühe, Schweine, Schafe, Hühner: spawnen auf Gras, laufen mit Wegfindung umher, schauen Spieler an, folgen Futter, flüchten nach Treffern, Loot nach Vanillas Tabellen; Schafe scheren, Kühe melken, Hühner legen Eier; werden gespeichert | ✅ |
+| Monster | Zombies, Skelette (schießen Pfeile), Creeper (explodieren), Spinnen (klettern, springen): spawnen im Dunkeln wie bei Vanilla, jagen Spieler über Wegfindung, Zombies und Skelette brennen in der Sonne; Schwierigkeitsgrade | ✅ |
+| Kampf | Nahkampf gegen Mobs und Spieler mit Aufladung, kritischen Treffern, Rückstoß, Waffenschaden aus Vanillas Daten; Rüstung schützt und nutzt sich ab; Explosionen zerstören Blöcke | ✅ |
+| Erfahrung | Kugeln von Mobs und Öfen fliegen zum Spieler, Level wie bei Vanilla, beim Tod fällt ein Teil heraus | ✅ |
+| Befehle | `/list`, `/gamemode`, `/time`, `/tp`, `/give`, `/kill`, `/summon`, `/difficulty`, `/experience` (`/xp`) (alle außer `/list` für Operatoren) | ✅ |
+| Welt | Speichern im Vanilla-Format samt `level.dat` und Entities, Vanilla-Welten laden | ✅ |
+| Fehlt | Braustände, Redstone, Wasser und Lava fließen, Verzauberungen, Züchten, Bogen für Spieler; alles in [`OFFENE-PUNKTE.md`](OFFENE-PUNKTE.md), auch die geplante Schicht für Fabric- und Forge-Mods | ⏳ |
 
 Wer sich verbindet, steht in einer endlosen Superflat-Welt (Grundgestein, zwei
 Lagen Erde, Gras), im Überlebensmodus oder in dem Modus aus `game_mode`, sieht
@@ -47,28 +50,37 @@ compression_threshold = 256  # ab dieser Paketgröße komprimieren, -1 = nie
 world = "world"              # Weltordner; leer = nichts speichern
 online_mode = true           # Spieler bei Mojang prüfen (wie Vanilla)
 game_mode = "survival"       # Modus neuer Spieler: survival, creative, adventure, spectator
-operators = ["Chaosnico9000"] # dürfen /gamemode, /time, /tp, /give, /kill, /summon und F3+F4
+operators = ["Chaosnico9000"] # dürfen alle Befehle außer /list nutzen und F3+F4
 animals = true               # Kühe, Schweine, Schafe und Hühner spawnen bei Spielern
+monsters = true              # Zombies, Skelette, Creeper und Spinnen spawnen im Dunkeln
+difficulty = "easy"          # peaceful, easy, normal, hard (wie Vanilla)
 ```
 
 ## Die Welt
 
 Gespeichert wird im Format und Ordner-Layout von Vanilla 26.3: Chunks samt
-Kisteninhalten und Schildtexten in
-`world/dimensions/minecraft/overworld/region/r.X.Z.mca`, Spieler (Position,
-Blickrichtung, Inventar, Endertruhe, Leben, Spielmodus) in
+Kisteninhalten, Öfen und Schildtexten in
+`world/dimensions/minecraft/overworld/region/r.X.Z.mca`, Tiere, Monster,
+liegende Items und Erfahrungskugeln in
+`world/dimensions/minecraft/overworld/entities/r.X.Z.mca`, Spieler (Position,
+Blickrichtung, Inventar, Endertruhe, Leben, Erfahrung, Spielmodus) in
 `world/players/data/<uuid>.dat`, Spawn und Weltzeit in `level.dat` und
 `data/minecraft/world_clocks.dat`. Ferrocraft schreibt
 nur Chunks, in denen sich etwas geändert hat, alle 5 Minuten, beim Verlassen
-eines Spielers und beim Beenden (Strg+C oder SIGTERM).
+eines Spielers und beim Beenden (Strg+C oder SIGTERM). Entities in Chunks,
+denen kein Spieler näher als 10 Chunks ist, ruhen wie bei Vanilla und kommen
+zurück, wenn jemand auf 8 Chunks herankommt.
 
 Vanilla 26.3 öffnet so eine Welt ohne Fehler (geprüft mit `data get block`
-für Kisten und Schilder), und Ferrocraft lädt von Vanilla geschriebene Welten
-samt Biomen und gespeichertem Licht. Was Ferrocraft nicht kennt (Entities,
-fremde Block-Entities, Strukturen), bleibt beim Speichern erhalten.
+für Kisten, Schilder und Öfen und `data get entity` für alle Mob-Arten), und
+Ferrocraft lädt von Vanilla geschriebene Welten samt Biomen, gespeichertem
+Licht und Entities. Was Ferrocraft nicht kennt (andere Entities wie Pferde,
+fremde Block-Entities, Strukturen), bleibt beim Speichern erhalten. Chunks,
+die Vanilla nur angefangen hat zu erzeugen, lässt Ferrocraft aus und erzeugt
+sie selbst.
 
-Log-Level über `RUST_LOG`, z. B. `RUST_LOG=debug cargo run`. Die Tick-Zeit
-erscheint alle 30 s mit `RUST_LOG=ferrocraft::tick=debug`.
+Log-Level über `RUST_LOG`, z. B. `RUST_LOG=debug cargo run`. Tick-Zeit und
+die Zahl der Mobs erscheinen alle 30 s mit `RUST_LOG=info,ferrocraft::game=debug`.
 
 ## Werkzeuge
 
@@ -79,13 +91,18 @@ cargo run -p ferrocraft-devtools --bin proxy -- 127.0.0.1:25570 127.0.0.1:25565 
 
 # Bots (nur Offline-Server, zum Bauen im Kreativmodus). Rollen reihum:
 # walk (läuft, springt, schleicht), build (baut Türme und reißt sie ab),
-# house (Kiste, Tür, Hebel), throw (wirft Items und sammelt sie ein)
+# house (Kiste, Tür, Hebel), throw (wirft Items und sammelt sie ein),
+# idle (steht still)
 cargo run -p ferrocraft-devtools --bin bot -- 127.0.0.1:25565 --count 8 --radius 4
 cargo run -p ferrocraft-devtools --bin bot -- 127.0.0.1:25565 --roles build,walk
+# Befehle ausführen (der Bot muss Operator sein), die Antworten erscheinen:
+cargo run -p ferrocraft-devtools --bin bot -- 127.0.0.1:25565 --name Admin \
+  --roles idle --seconds 3 --commands "time set midnight;summon zombie ~5 ~ ~"
 
 # Daten für eine Version neu erzeugen (Paket-IDs, Registries, Tags, Blöcke,
-# Items, Rezepte, Loot-Tabellen). Braucht Java: Mojangs Datengenerator und
-# scripts/BlockPhysics.java (Härte, Licht, Kollisionsformen je Zustand)
+# Items, Brennstoffe, Rezepte, Loot-Tabellen). Braucht Java: Mojangs
+# Datengenerator und scripts/BlockPhysics.java (Härte, Explosionsfestigkeit,
+# Licht, Kollisionsformen, Spawnflächen je Zustand)
 # scripts/EntityInfo.java (Größe, Reichweite, Attribute je Entity-Typ) laufen
 # gegen den Vanilla-Jar. Der Server selbst bleibt reines Rust.
 scripts/gen-reports.sh 26.3
@@ -99,6 +116,7 @@ crates/protocol   Wire-Typen (VarInt, Strings, UUID, BlockPos), NBT, Chunk-Forma
 crates/server     Netzwerk (tokio, ein Task pro Verbindung), Status, Login und
                   Mojang-Auth (RSA über aws-lc-rs), Configuration, Play,
                   game/ (Tick-Thread: Spieler, Menüs, Überleben, Items,
+                  Mobs mit Wegfindung, Pfeile, Explosionen, Erfahrung, Öfen,
                   Befehle), Welt, Licht, Block-Entities, Rezepte, Loot,
                   Speichern
 crates/devtools   Test-Client, gen-data (Daten aus dem Datengenerator),

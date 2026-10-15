@@ -125,6 +125,10 @@ fn packet_ids_match_report() {
     check::<p::SystemChat>(r, "play", cb, "system_chat");
     check::<p::Chat>(r, "play", sb, "chat");
     check::<p::ChatCommand>(r, "play", sb, "chat_command");
+    check::<p::SetExperience>(r, "play", cb, "set_experience");
+    check::<p::ContainerSetData>(r, "play", cb, "container_set_data");
+    check::<p::ChangeDifficulty>(r, "play", cb, "change_difficulty");
+    check::<p::Explode>(r, "play", cb, "explode");
 
     for (id, name) in [
         (p::MOVE_PLAYER_POS, "move_player_pos"),

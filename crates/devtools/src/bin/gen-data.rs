@@ -13,7 +13,7 @@
 //!   they use,
 //! - `entities.json`: size, tracking and base attributes of every entity type,
 //!   from `entity_info.json` (`scripts/EntityInfo.java`),
-//! - `recipes.json`: the crafting recipes,
+//! - `recipes.json`: the crafting and cooking recipes,
 //! - `ids.json`: the names of further static registries in network-id order.
 //!
 //!   gen-data <generator output dir> <data/version dir>
@@ -108,6 +108,7 @@ fn main() -> anyhow::Result<()> {
     let items = items_json(
         &ids["minecraft:item"],
         &generated.join("reports/minecraft/components/item"),
+        &data,
     )?;
     let loot_tables = loot_tables_json(&data)?;
     let entity_info = read_json(&generated.join("entity_info.json"))
@@ -122,6 +123,7 @@ fn main() -> anyhow::Result<()> {
         "command_argument_type",
         "data_component_type",
         "sound_event",
+        "particle_type",
     ] {
         names.push(format!(
             "  \"{registry}\": {}",
@@ -383,6 +385,7 @@ fn read_blocks(
                 "item": block["item"],
                 "hardness": block["hardness"],
                 "requires_tool": block["requires_tool"],
+                "explosion_resistance": block["explosion_resistance"],
                 "states": block["states"],
             });
             if let Some(entity) = block["block_entity"].as_str() {
@@ -447,8 +450,13 @@ fn tags_json(registries: &Tags) -> String {
 
 /// One item per line, in network-id order, with the default components the
 /// server uses: `{"name", "stack", "max_damage"?, "tool"?, "food"?,
-/// "consume_seconds"?}`.
-fn items_json(item_ids: &HashMap<String, i32>, components: &Path) -> anyhow::Result<String> {
+/// "consume_seconds"?, "attack_damage"?, "attack_speed"?, "armor"?,
+/// "armor_toughness"?, "fuel"?}`.
+fn items_json(
+    item_ids: &HashMap<String, i32>,
+    components: &Path,
+    data: &Path,
+) -> anyhow::Result<String> {
     let mut items: Vec<(&i32, &String)> = item_ids.iter().map(|(n, id)| (id, n)).collect();
     items.sort();
     let mut lines = Vec::new();
@@ -476,11 +484,13 @@ fn items_json(item_ids: &HashMap<String, i32>, components: &Path) -> anyhow::Res
         if c["minecraft:food"].is_object() {
             line["food"] = c["minecraft:food"].clone();
         }
-        // `attribute_modifiers` of weapons: what they add to the player's
-        // attack damage and speed.
+        // `attribute_modifiers` of weapons and armor: what they add to the
+        // wearer's attack damage and speed, armor and toughness.
         for (attribute, key) in [
             ("minecraft:attack_damage", "attack_damage"),
             ("minecraft:attack_speed", "attack_speed"),
+            ("minecraft:armor", "armor"),
+            ("minecraft:armor_toughness", "armor_toughness"),
         ] {
             let bonus: f64 = c["minecraft:attribute_modifiers"]
                 .as_array()
@@ -499,9 +509,61 @@ fn items_json(item_ids: &HashMap<String, i32>, components: &Path) -> anyhow::Res
                 .unwrap_or(1.6)
                 .into();
         }
+        // `cooking_fuel`: its burn time and the speed it gives, resolved for a
+        // furnace and for the fast smoker and blast furnace.
+        let fuel = &c["minecraft:cooking_fuel"];
+        if fuel.is_object() {
+            let mut resolved = Vec::new();
+            for fast in [false, true] {
+                let ticks = resolve_number(data, "context_int_provider", &fuel["burn_time"], fast)
+                    .with_context(|| format!("burn time of {name}"))?;
+                let speed = match &fuel["speed_multiplier"] {
+                    Value::Null => 1.0,
+                    speed => resolve_number(data, "context_float_provider", speed, fast)
+                        .with_context(|| format!("cooking speed of {name}"))?,
+                };
+                resolved.push(serde_json::json!([ticks.floor() as i64, speed]));
+            }
+            line["fuel"] = resolved.into();
+        }
         lines.push(format!("  {line}"));
     }
     Ok(format!("[\n{}\n]\n", lines.join(",\n")))
+}
+
+/// The value of a context number provider (`cooking/time_coal`) in a
+/// furnace, or with `fast` in a smoker or blast furnace: constants,
+/// references, quotients and the `block/fast_cooking` condition, which is
+/// all the cooking fuels use.
+fn resolve_number(data: &Path, registry: &str, value: &Value, fast: bool) -> anyhow::Result<f64> {
+    match value {
+        Value::Number(n) => n.as_f64().context("number"),
+        Value::String(name) => {
+            let path = data
+                .join(registry)
+                .join(format!("{}.json", name.trim_start_matches("minecraft:")));
+            resolve_number(data, registry, &read_json(&path)?, fast)
+        }
+        Value::Object(o) => match o.get("type").and_then(Value::as_str) {
+            Some("minecraft:div") => {
+                let left = resolve_number(data, registry, &o["left"], fast)?;
+                let right = resolve_number(data, registry, &o["right"], fast)?;
+                // `Quotient` of two ints divides as Java does.
+                Ok((left / right).trunc())
+            }
+            Some("minecraft:conditional") => {
+                let condition = o["condition"].as_str().unwrap_or("");
+                if condition != "minecraft:block/fast_cooking" {
+                    bail!("unknown condition {condition}");
+                }
+                let branch = if fast { &o["on_true"] } else { &o["on_false"] };
+                resolve_number(data, registry, branch, fast)
+            }
+            Some("minecraft:constant") => o["value"].as_f64().context("constant"),
+            other => bail!("unknown number provider {other:?}"),
+        },
+        other => bail!("unknown number {other}"),
+    }
 }
 
 /// `{"tables": {"minecraft:blocks/stone": <table>, "minecraft:entities/cow":
@@ -536,6 +598,8 @@ const ENTITY_ATTRIBUTES: &[&str] = &[
     "knockback_resistance",
     "safe_fall_distance",
     "attack_damage",
+    "follow_range",
+    "armor",
 ];
 
 /// One entity type per line, in network-id order: `{"name", "width",
@@ -568,13 +632,22 @@ fn entities_json(entity_ids: &HashMap<String, i32>, info: &Value) -> anyhow::Res
     Ok(format!("[\n{}\n]\n", lines.join(",\n")))
 }
 
-/// The shaped and shapeless crafting recipes, one per line.
+/// The shaped and shapeless crafting recipes and the cooking ones, one per
+/// line.
 fn recipes_json(dir: &Path) -> anyhow::Result<String> {
     let mut lines = Vec::new();
     for path in walk(dir)? {
         let recipe = read_json(&path)?;
         let kind = recipe["type"].as_str().unwrap_or("");
-        if kind == "minecraft:crafting_shaped" || kind == "minecraft:crafting_shapeless" {
+        if matches!(
+            kind,
+            "minecraft:crafting_shaped"
+                | "minecraft:crafting_shapeless"
+                | "minecraft:smelting"
+                | "minecraft:blasting"
+                | "minecraft:smoking"
+                | "minecraft:campfire_cooking"
+        ) {
             let name = slash_path(path.strip_prefix(dir)?.with_extension("").as_path());
             lines.push(format!("  \"minecraft:{name}\": {recipe}"));
         }

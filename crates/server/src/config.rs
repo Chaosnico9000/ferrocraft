@@ -32,6 +32,10 @@ pub struct Config {
     pub operators: Vec<String>,
     /// Cows, pigs, sheep and chickens spawn near players.
     pub animals: bool,
+    /// Zombies, skeletons, creepers and spiders spawn in the dark.
+    pub monsters: bool,
+    /// peaceful, easy, normal or hard, like vanilla's `difficulty`.
+    pub difficulty: String,
 }
 
 impl Default for Config {
@@ -48,6 +52,8 @@ impl Default for Config {
             game_mode: "survival".into(),
             operators: Vec::new(),
             animals: true,
+            monsters: true,
+            difficulty: "easy".into(),
         }
     }
 }

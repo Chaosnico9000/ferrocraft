@@ -40,7 +40,7 @@ pub type Aabb = [f64; 6];
 
 /// What `scripts/BlockPhysics.java` read from vanilla for one state.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(from = "(u8, u8, bool, u16, u16, u16, u16, u16, u16, u16, u8)")]
+#[serde(from = "(u8, u8, bool, u16, u16, u16, u16, u16, u16, u16, u8, bool)")]
 pub struct StatePhysics {
     /// Block light the state gives off, 0–15.
     pub emission: u8,
@@ -55,23 +55,15 @@ pub struct StatePhysics {
     pub faces: [u16; 6],
     /// 0 none, 1 water, 2 lava.
     pub fluid: u8,
+    /// Monsters may spawn on top (`BlockState.isValidSpawn` for a zombie).
+    pub spawnable: bool,
 }
 
-impl From<(u8, u8, bool, u16, u16, u16, u16, u16, u16, u16, u8)> for StatePhysics {
+type RawPhysics = (u8, u8, bool, u16, u16, u16, u16, u16, u16, u16, u8, bool);
+
+impl From<RawPhysics> for StatePhysics {
     fn from(
-        (emission, dampening, sky_passes, collision, d, u, n, s, w, e, fluid): (
-            u8,
-            u8,
-            bool,
-            u16,
-            u16,
-            u16,
-            u16,
-            u16,
-            u16,
-            u16,
-            u8,
-        ),
+        (emission, dampening, sky_passes, collision, d, u, n, s, w, e, fluid, spawnable): RawPhysics,
     ) -> Self {
         Self {
             emission,
@@ -80,6 +72,7 @@ impl From<(u8, u8, bool, u16, u16, u16, u16, u16, u16, u16, u8)> for StatePhysic
             collision,
             faces: [d, u, n, s, w, e],
             fluid,
+            spawnable,
         }
     }
 }
@@ -99,6 +92,8 @@ pub struct Block {
     pub hardness: f32,
     /// Drops only for the right tool (`requiresCorrectToolForDrops`).
     pub requires_tool: bool,
+    /// How much of an explosion's power it swallows.
+    pub explosion_resistance: f32,
     pub block_entity: Option<String>,
     /// One entry for all states, or one per state.
     states: Vec<StatePhysics>,
@@ -121,6 +116,14 @@ pub struct Item {
     pub attack_damage: f32,
     #[serde(default)]
     pub attack_speed: f32,
+    /// What the item adds to its wearer's armor and toughness.
+    #[serde(default)]
+    pub armor: f32,
+    #[serde(default)]
+    pub armor_toughness: f32,
+    /// As fuel: ticks it burns and how much faster it cooks, in a furnace
+    /// and in a smoker or blast furnace.
+    pub fuel: Option<[(i32, f32); 2]>,
 }
 
 /// An entity type as `scripts/EntityInfo.java` read it from vanilla.
@@ -141,6 +144,9 @@ pub struct EntityInfo {
     pub gravity: Option<f64>,
     pub knockback_resistance: Option<f64>,
     pub attack_damage: Option<f32>,
+    /// How far a mob notices its target.
+    pub follow_range: Option<f64>,
+    pub armor: Option<f32>,
 }
 
 /// The `tool` component: how fast an item breaks which blocks.
@@ -200,6 +206,7 @@ struct Ids {
     command_argument_type: Vec<String>,
     data_component_type: Vec<String>,
     sound_event: Vec<String>,
+    particle_type: Vec<String>,
 }
 
 impl Block {
@@ -472,6 +479,10 @@ impl GameData {
         position(&self.ids.sound_event, name)
     }
 
+    pub fn particle_type(&self, name: &str) -> anyhow::Result<i32> {
+        position(&self.ids.particle_type, name)
+    }
+
     pub fn item(&self, id: i32) -> Option<&Item> {
         self.items.get(usize::try_from(id).ok()?)
     }
@@ -534,6 +545,17 @@ impl GameData {
             .find(|r| r.registry == "minecraft:item")
             .and_then(|r| r.tags.iter().find(|(name, _)| name == tag))
             .map(|(_, ids)| ids.as_slice())
+    }
+
+    /// Whether a tag of a registry the client gets tags of holds `id`, e.g.
+    /// `minecraft:bypasses_armor` of `minecraft:damage_type`.
+    pub fn tag_contains(&self, registry: &str, tag: &str, id: i32) -> bool {
+        self.tags
+            .registries
+            .iter()
+            .find(|r| r.registry == registry)
+            .and_then(|r| r.tags.iter().find(|(name, _)| name == tag))
+            .is_some_and(|(_, ids)| ids.contains(&id))
     }
 
     /// Network ids of the blocks in a block tag such as `minecraft:replaceable`.

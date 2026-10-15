@@ -96,6 +96,7 @@ impl Level {
         storage: &Storage,
         layers: &[(&str, i32)],
         biome: &str,
+        difficulty: &str,
     ) -> anyhow::Result<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -107,7 +108,7 @@ impl Level {
                 (
                     "difficulty_settings".into(),
                     Nbt::Compound(vec![
-                        ("difficulty".into(), s("normal")),
+                        ("difficulty".into(), s(difficulty)),
                         ("hardcore".into(), Nbt::Byte(0)),
                         ("locked".into(), Nbt::Byte(0)),
                     ]),
@@ -296,7 +297,12 @@ mod tests {
         level.game_time = 12_345;
         level.day_time = 30_000;
         level
-            .save(&storage, &[("minecraft:bedrock", 1)], "minecraft:plains")
+            .save(
+                &storage,
+                &[("minecraft:bedrock", 1)],
+                "minecraft:plains",
+                "normal",
+            )
             .unwrap();
         assert_eq!(Level::load(&storage).unwrap(), Some(level));
         std::fs::remove_dir_all(dir).unwrap();

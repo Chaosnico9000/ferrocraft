@@ -121,7 +121,14 @@ pub struct World {
     light_updates: Mutex<HashMap<ChunkPos, (u32, u32)>>,
     /// Loaded chunks that still need their light computed.
     unlit: Mutex<Vec<ChunkPos>>,
+    /// Block entities that work by themselves every tick: furnaces.
+    ticking: Mutex<HashSet<BlockPos>>,
     data: Arc<GameData>,
+}
+
+/// Block entities that tick.
+fn ticks(kind: &str) -> bool {
+    crate::crafting::Cooker::of(kind).is_some()
 }
 
 impl World {
@@ -157,6 +164,7 @@ impl World {
             dirty: Mutex::new(HashSet::new()),
             light_updates: Mutex::new(HashMap::new()),
             unlit: Mutex::new(Vec::new()),
+            ticking: Mutex::new(HashSet::new()),
             data,
         };
         world.template = world.encode(0, 0, &world.generate());
@@ -242,7 +250,12 @@ impl World {
         // double chest keeps its items.
         if chunk.block_entities.get(&pos).map(|e| &e.kind) != kind.as_ref() {
             chunk.block_entities.remove(&pos);
+            let mut ticking = self.ticking.lock().expect("world lock");
+            ticking.remove(&pos);
             if let Some(kind) = kind {
+                if ticks(&kind) {
+                    ticking.insert(pos);
+                }
                 chunk.block_entities.insert(pos, BlockEntity::new(&kind));
             }
         }
@@ -277,6 +290,20 @@ impl World {
         pos: BlockPos,
         change: impl FnOnce(&mut BlockEntity),
     ) -> bool {
+        self.change_block_entity(pos, |entity| {
+            change(entity);
+            true
+        })
+    }
+
+    /// Changes the block entity at `pos`, which is to be saved again only
+    /// if `change` says something worth saving changed; `false` if there
+    /// is none.
+    pub fn change_block_entity(
+        &self,
+        pos: BlockPos,
+        change: impl FnOnce(&mut BlockEntity) -> bool,
+    ) -> bool {
         let mut changed = self.changed.write().expect("world lock");
         let Some(chunk) = changed.get_mut(&chunk_of(pos)) else {
             return false;
@@ -284,12 +311,49 @@ impl World {
         let Some(entity) = chunk.block_entities.get_mut(&pos) else {
             return false;
         };
-        change(entity);
-        entity.modified = true;
-        chunk.modified = true;
-        drop(changed);
-        self.dirty.lock().expect("world lock").insert(chunk_of(pos));
+        if change(entity) {
+            entity.modified = true;
+            chunk.modified = true;
+            drop(changed);
+            self.dirty.lock().expect("world lock").insert(chunk_of(pos));
+        }
         true
+    }
+
+    /// Where the block entities are that tick, such as furnaces.
+    pub fn ticking_block_entities(&self) -> Vec<BlockPos> {
+        let mut positions: Vec<BlockPos> = self
+            .ticking
+            .lock()
+            .expect("world lock")
+            .iter()
+            .copied()
+            .collect();
+        positions.sort_unstable_by_key(|p| (p.x, p.y, p.z));
+        positions
+    }
+
+    /// The highest block of a column that is not air, or the bottom of the
+    /// world below it (`Heightmap.Types.WORLD_SURFACE` minus one).
+    pub fn top_y(&self, x: i32, z: i32) -> i32 {
+        let changed = self.changed.read().expect("world lock");
+        let Some(chunk) = changed.get(&(x >> 4, z >> 4)) else {
+            return self.surface_y - 1;
+        };
+        let column = column_index(x, z);
+        for (section, blocks) in chunk.sections.iter().enumerate().rev() {
+            if let Section::Uniform(state) = blocks
+                && *state == self.air
+            {
+                continue;
+            }
+            for y in (0..16).rev() {
+                if blocks.get(y * 256 + column) != self.air {
+                    return MIN_Y + (section * 16 + y) as i32;
+                }
+            }
+        }
+        MIN_Y - 1
     }
 
     /// The light level at a position.
@@ -334,6 +398,13 @@ impl World {
             })
             .collect();
         let lit = stored.light.is_some();
+        self.ticking.lock().expect("world lock").extend(
+            stored
+                .block_entities
+                .iter()
+                .filter(|(_, e)| ticks(&e.kind))
+                .map(|(pos, _)| *pos),
+        );
         let chunk = Chunk {
             sections,
             biomes: stored.biomes,

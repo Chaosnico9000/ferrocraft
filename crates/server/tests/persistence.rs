@@ -202,3 +202,58 @@ async fn a_broken_player_file_does_not_keep_the_player_out() {
     }
     panic!("the player still counts as online");
 }
+
+#[tokio::test]
+async fn animals_and_monsters_survive_a_restart() {
+    use ferrocraft::data::GameData;
+    use ferrocraft_protocol::packets::play::AddEntity;
+
+    let data = GameData::load().unwrap();
+    let (cow_type, _) = data.entity("minecraft:cow").unwrap();
+    let (zombie_type, _) = data.entity("minecraft:zombie").unwrap();
+    let world = TempWorld::new("entities");
+    let config = Config {
+        world: world.0.to_string_lossy().into_owned(),
+        operators: vec!["Alex".into()],
+        ..test_config()
+    };
+    let (server, addr) = start_server(config.clone(), Timing::default()).await;
+    let (mut alex, _) = join(addr, "Alex", 4).await;
+    for command in [
+        "time set midnight",
+        "summon cow 4 -60 4",
+        "summon zombie -4 -60 4",
+    ] {
+        alex.send(&ChatCommand {
+            command: command.into(),
+        })
+        .await;
+    }
+    let cow = read_matching(&mut alex, |a: &AddEntity| a.entity_type == cow_type).await;
+    read_matching(&mut alex, |a: &AddEntity| a.entity_type == zombie_type).await;
+    server.shutdown().await;
+    assert!(
+        world
+            .0
+            .join("dimensions/minecraft/overworld/entities/r.0.0.mca")
+            .exists(),
+        "vanilla's entity storage"
+    );
+
+    let (_server, addr) = start_server(config, Timing::default()).await;
+    let (mut alex, _) = join(addr, "Alex", 4).await;
+    // Both come back, in no particular order.
+    let (mut cow_back, mut zombie_back) = (None, false);
+    while cow_back.is_none() || !zombie_back {
+        let added: AddEntity = alex.read_until().await;
+        if added.entity_type == cow_type {
+            cow_back = Some(added);
+        } else if added.entity_type == zombie_type {
+            zombie_back = true;
+        }
+    }
+    let back = cow_back.unwrap();
+    let distance = (back.pos[0] - cow.pos[0]).hypot(back.pos[2] - cow.pos[2]);
+    assert!(distance < 4.0, "{:?} vs {:?}", back.pos, cow.pos);
+    assert_eq!(back.uuid, cow.uuid, "the same cow");
+}

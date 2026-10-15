@@ -46,6 +46,11 @@ impl Tracker {
         }
     }
 
+    /// Ticks between updates.
+    pub fn interval(&self) -> u32 {
+        self.interval
+    }
+
     /// Called every tick; returns the movement packets that are due. `force`
     /// makes this tick an update even off the interval, as changed entity
     /// data does in vanilla.

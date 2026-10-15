@@ -1,6 +1,7 @@
 //! Commands: the tree the client completes against and what running them
-//! does. Operators (permission level 4) get `gamemode`, `time`, `tp`, `give`
-//! and `kill`; everyone gets `list`.
+//! does. Operators (permission level 4) get `gamemode`, `time`, `tp`,
+//! `give`, `kill`, `summon`, `difficulty` and `experience`; everyone gets
+//! `list`.
 
 use ferrocraft_protocol::Nbt;
 use ferrocraft_protocol::packets::play::{
@@ -146,6 +147,39 @@ pub fn tree(data: &GameData, permission: u8) -> Commands {
         let at = t.argument("pos", "minecraft:vec3", Vec::new(), true, Vec::new());
         let entity = t.argument("entity", "minecraft:resource", properties, true, vec![at]);
         root.push(t.literal("summon", false, vec![entity]));
+
+        let levels: Vec<i32> = DIFFICULTIES
+            .iter()
+            .map(|d| t.literal(d, true, Vec::new()))
+            .collect();
+        root.push(t.literal("difficulty", true, levels));
+
+        // `experience add|set <targets> <amount> [levels|points]`,
+        // `experience query <target> levels|points`.
+        let mut experience = Vec::new();
+        for (action, min) in [("add", i32::MIN), ("set", 0)] {
+            let units = vec![
+                t.literal("levels", true, Vec::new()),
+                t.literal("points", true, Vec::new()),
+            ];
+            let amount = t.argument(
+                "amount",
+                "brigadier:integer",
+                [&[1u8][..], &min.to_be_bytes()].concat(),
+                true,
+                units,
+            );
+            let targets = t.entities("targets", false, false, vec![amount]);
+            experience.push(t.literal(action, false, vec![targets]));
+        }
+        let units = vec![
+            t.literal("levels", true, Vec::new()),
+            t.literal("points", true, Vec::new()),
+        ];
+        let target = t.entities("target", true, false, units);
+        experience.push(t.literal("query", false, vec![target]));
+        root.push(t.literal("experience", false, experience.clone()));
+        root.push(t.literal("xp", false, experience));
     }
     let root = t.add(NodeKind::Root, false, root);
     Commands {
@@ -171,6 +205,16 @@ fn mode_name(mode: GameMode) -> Nbt {
     };
     text::translate(key, Vec::new(), None)
 }
+
+/// `Difficulty` by name, 0 peaceful to 3 hard.
+pub fn parse_difficulty(word: &str) -> Option<u8> {
+    DIFFICULTIES
+        .iter()
+        .position(|&d| d == word)
+        .map(|d| d as u8)
+}
+
+pub const DIFFICULTIES: [&str; 4] = ["peaceful", "easy", "normal", "hard"];
 
 pub fn parse_mode(word: &str) -> Option<GameMode> {
     Some(match word {
@@ -260,6 +304,8 @@ impl Game {
             ["tp" | "teleport", rest @ ..] => self.tp_command(sender, rest),
             ["give", target, item, rest @ ..] => self.give_command(sender, target, item, rest),
             ["summon", entity, rest @ ..] => self.summon_command(sender, entity, rest),
+            ["difficulty", rest @ ..] => self.difficulty_command(rest),
+            ["experience" | "xp", rest @ ..] => self.experience_command(sender, rest),
             ["kill", rest @ ..] => {
                 let victims = match rest {
                     [] => vec![sender],
@@ -442,7 +488,7 @@ impl Game {
         Ok(reply)
     }
 
-    /// `/summon <entity> [x y z]`, for the animals Ferrocraft knows.
+    /// `/summon <entity> [x y z]`, for the mobs Ferrocraft knows.
     fn summon_command(&mut self, sender: i32, entity: &str, rest: &[&str]) -> Reply {
         let name = if entity.contains(':') {
             entity.to_owned()
@@ -475,6 +521,114 @@ impl Game {
         Ok(text::translate(
             "commands.summon.success",
             vec![text::translate(&key, Vec::new(), None)],
+            None,
+        ))
+    }
+
+    /// `/difficulty [peaceful|easy|normal|hard]`.
+    fn difficulty_command(&mut self, rest: &[&str]) -> Reply {
+        let name = |d: u8| {
+            text::translate(
+                &format!("options.difficulty.{}", DIFFICULTIES[usize::from(d)]),
+                Vec::new(),
+                None,
+            )
+        };
+        match rest {
+            [] => Ok(text::translate(
+                "commands.difficulty.query",
+                vec![name(self.context.difficulty)],
+                None,
+            )),
+            [word] => {
+                let Some(difficulty) = parse_difficulty(word) else {
+                    return Err(error("command.unknown.argument", Vec::new()));
+                };
+                if difficulty == self.context.difficulty {
+                    return Err(error("commands.difficulty.failure", vec![name(difficulty)]));
+                }
+                self.context.difficulty = difficulty;
+                self.send_difficulty(None);
+                Ok(text::translate(
+                    "commands.difficulty.success",
+                    vec![name(difficulty)],
+                    None,
+                ))
+            }
+            _ => Err(error("command.unknown.argument", Vec::new())),
+        }
+    }
+
+    /// `/experience add|set <targets> <amount> [levels|points]` and
+    /// `/experience query <target> levels|points`.
+    fn experience_command(&mut self, sender: i32, rest: &[&str]) -> Reply {
+        let (action, target, amount, unit) = match rest {
+            ["query", target, unit] => ("query", *target, "0", *unit),
+            [action @ ("add" | "set"), target, amount] => (*action, *target, *amount, "points"),
+            [action @ ("add" | "set"), target, amount, unit] => (*action, *target, *amount, *unit),
+            _ => return Err(error("command.unknown.argument", Vec::new())),
+        };
+        let levels = match unit {
+            "levels" => true,
+            "points" => false,
+            _ => return Err(error("command.unknown.argument", Vec::new())),
+        };
+        let Ok(amount) = amount.parse::<i32>() else {
+            return Err(error("parsing.int.invalid", vec![text::plain(amount)]));
+        };
+        let targets = self.targets(sender, target);
+        let Some(&first) = targets.first() else {
+            return Err(error("argument.player.unknown", Vec::new()));
+        };
+        let unit = if levels { "levels" } else { "points" };
+        match action {
+            "query" => {
+                let experience = self.players[&first].experience;
+                let value = if levels {
+                    experience.level
+                } else {
+                    (experience.progress * super::orb::needed_for(experience.level) as f32) as i32
+                };
+                return Ok(text::translate(
+                    &format!("commands.experience.query.{unit}"),
+                    vec![self.player_name(first), text::plain(&value.to_string())],
+                    None,
+                ));
+            }
+            "add" => {
+                for &target in &targets {
+                    if levels {
+                        self.give_levels(target, amount);
+                    } else {
+                        self.give_experience(target, amount);
+                    }
+                }
+            }
+            _ => {
+                for &target in &targets {
+                    let Some(player) = self.players.get_mut(&target) else {
+                        continue;
+                    };
+                    if levels {
+                        player.experience.level = amount;
+                    } else {
+                        // `setExperiencePoints`: within the current level.
+                        let needed = super::orb::needed_for(player.experience.level);
+                        if amount >= needed {
+                            return Err(error(
+                                "commands.experience.set.points.invalid",
+                                Vec::new(),
+                            ));
+                        }
+                        player.experience.progress = amount as f32 / needed as f32;
+                    }
+                    self.send_experience(target);
+                }
+            }
+        }
+        Ok(text::translate(
+            &format!("commands.experience.{action}.{unit}.success.single"),
+            vec![text::plain(&amount.to_string()), self.player_name(first)],
             None,
         ))
     }

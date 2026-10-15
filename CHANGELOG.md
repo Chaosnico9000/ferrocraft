@@ -7,6 +7,44 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
 
 ### Neu
 
+- Monster: Zombies, Skelette, Creeper und Spinnen spawnen nach Vanillas
+  Regeln im Dunkeln (Licht, Obergrenze je Spieler, Gewichte der Ebene),
+  verschwinden fern der Spieler und im Friedlich-Modus. Sie suchen sich
+  Spieler im Überlebensmodus in Sichtweite, laufen mit Wegfindung zu ihnen
+  und greifen an: Zombies und Spinnen schlagen zu, Spinnen springen und
+  klettern Wände hoch und sind bei Tag friedlich, Skelette spannen ihren
+  Bogen und schießen Pfeile, Creeper zischen und explodieren. Zombies und
+  Skelette fangen in der Sonne Feuer. Beute nach Vanillas Tabellen,
+  Geräusche, Babyzombies. `monsters = false` schaltet sie ab.
+- Wegfindung (A*) für alle Mobs: um Wände herum, Stufen hoch, ein paar
+  Blöcke hinunter, nie in Lava, Feuer oder Kakteen.
+- Explosionen wie bei Vanilla: Strahlen durch die Blöcke nach deren
+  Explosionsfestigkeit, Schaden und Rückstoß nach Abstand und Deckung; die
+  Blöcke lassen ihre Beute mit Verfall fallen, Kisten ihren Inhalt.
+- Pfeile mit Schwerkraft, Treffern an Blöcken und Wesen und Schaden nach
+  Geschwindigkeit; stecken bleibende Pfeile verschwinden nach einer Minute.
+- Erfahrung: Kugeln von getöteten Mobs und aus Öfen fliegen zum nächsten
+  Spieler und verschmelzen; Level und Fortschritt wie bei Vanilla, Fanfare
+  alle fünf Level, gespeichert in der Spielerdatei. Wer stirbt, verliert seine
+  Erfahrung, ein Teil fällt als Kugeln heraus.
+- Öfen, Räucheröfen und Hochöfen: Brennstoffe und Brennzeiten aus Vanillas
+  `cooking_fuel`-Daten, Ofenrezepte aus dem Datenpaket, Räucher- und Hochöfen
+  doppelt so schnell, Lava lässt den Eimer zurück. Das Menü zeigt Feuer und
+  Fortschritt, Shift-Klick sortiert Erz nach oben und Brennstoff nach unten,
+  der Block glüht beim Brennen. Herausnehmen gibt die Erfahrung der Rezepte.
+- Rüstung schützt (Rüstungswerte und Härte aus Vanillas Daten) und nutzt sich
+  bei Treffern ab.
+- Schwierigkeitsgrad `difficulty` (wie Vanilla `easy` voreingestellt) und
+  `/difficulty`: Schaden durch Mobs und Explosionen, Verhungern bis zur halben
+  Leiste, einem halben Herz oder zum Tod, Heilen im Friedlich-Modus.
+- Tiere, Monster, liegende Items und Erfahrungskugeln werden in Vanillas
+  Entity-Speicher gesichert und kommen nach einem Neustart zurück; Entities
+  aus Vanilla-Welten, die Ferrocraft nicht kennt, bleiben erhalten. Tiere
+  spawnen jetzt wie bei Vanilla alle 20 Sekunden und verschwinden nicht mehr.
+- `/summon` für Zombies, Skelette, Creeper und Spinnen, `/experience` (`/xp`)
+  zum Vergeben und Abfragen von Erfahrung; Creeper lassen sich mit Feuerzeug
+  anzünden.
+- Bots: Rolle `idle` und `--commands`, um Befehle auszuführen.
 - Tiere: Kühe, Schweine, Schafe und Hühner spawnen in Herden auf Gras um die
   Spieler, laufen umher, schauen Spieler an, folgen jemandem mit ihrem Futter
   in der Hand und rennen weg, wenn man sie schlägt. Sie geben, was Vanillas
@@ -53,6 +91,10 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
 
 ### Behoben
 
+- Vanilla-Welten luden Chunks, die Vanilla nur angefangen hatte zu erzeugen,
+  als fertig: Um den erkundeten Bereich herum fehlte dann der Boden, und der
+  Start dauerte lange (900 Chunks, 16 s). Solche Chunks werden jetzt
+  übersprungen und neu erzeugt.
 - Wird die Maschine beim Speichern hart abgeschaltet, bleibt keine leere
   Spielerdatei mehr zurück, mit der der Spieler nicht mehr hereinkam: Dateien
   werden vor dem Umbenennen auf die Platte geschrieben (`fsync`), die vorige

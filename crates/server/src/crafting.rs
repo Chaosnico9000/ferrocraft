@@ -1,6 +1,7 @@
-//! Crafting recipes from vanilla's data pack: shaped ones match their
+//! Recipes from vanilla's data pack: shaped crafting recipes match their
 //! pattern anywhere in the grid, also mirrored; shapeless ones any
-//! arrangement of their ingredients.
+//! arrangement of their ingredients. Cooking recipes turn one item into
+//! another in a furnace, smoker or blast furnace.
 
 use std::collections::HashMap;
 
@@ -31,9 +32,50 @@ enum Recipe {
     },
 }
 
+/// Where a cooking recipe works (`RecipeType`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cooker {
+    Furnace,
+    Smoker,
+    BlastFurnace,
+    Campfire,
+}
+
+impl Cooker {
+    /// The cooker a furnace-like block entity type is.
+    pub fn of(block_entity: &str) -> Option<Self> {
+        match block_entity {
+            "minecraft:furnace" => Some(Self::Furnace),
+            "minecraft:smoker" => Some(Self::Smoker),
+            "minecraft:blast_furnace" => Some(Self::BlastFurnace),
+            _ => None,
+        }
+    }
+
+    /// Smokers and blast furnaces burn fuel twice as fast
+    /// (`minecraft:block/fast_cooking`).
+    pub fn fast(self) -> bool {
+        matches!(self, Self::Smoker | Self::BlastFurnace)
+    }
+}
+
+/// A smelting, smoking, blasting or campfire recipe.
+#[derive(Debug, Clone)]
+pub struct Cooking {
+    /// `minecraft:iron_ingot_from_smelting_iron_ore`.
+    pub name: String,
+    pub cooker: Cooker,
+    pub ingredient: Ingredient,
+    pub output: Output,
+    pub experience: f32,
+    /// Ticks at normal speed.
+    pub time: i32,
+}
+
 #[derive(Debug, Default)]
 pub struct Recipes {
     recipes: Vec<Recipe>,
+    cooking: Vec<Cooking>,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +110,29 @@ enum RawRecipe {
         ingredients: Vec<RawIngredient>,
         result: RawResult,
     },
+    #[serde(rename = "minecraft:smelting")]
+    Smelting(RawCooking),
+    #[serde(rename = "minecraft:smoking")]
+    Smoking(RawCooking),
+    #[serde(rename = "minecraft:blasting")]
+    Blasting(RawCooking),
+    #[serde(rename = "minecraft:campfire_cooking")]
+    Campfire(RawCooking),
+}
+
+#[derive(Deserialize)]
+struct RawCooking {
+    ingredient: RawIngredient,
+    result: RawResult,
+    #[serde(default)]
+    experience: f32,
+    /// `AbstractCookingRecipe.Serializer`'s default.
+    #[serde(default = "two_hundred")]
+    cookingtime: i32,
+}
+
+fn two_hundred() -> i32 {
+    200
 }
 
 impl Recipes {
@@ -101,11 +166,38 @@ impl Recipes {
             })
         };
         let mut recipes = Vec::new();
+        let mut cooking = Vec::new();
         let mut names: Vec<_> = raw.into_iter().collect();
         // A stable order, so that the same grid always gives the same result.
         names.sort_by(|a, b| a.0.cmp(&b.0));
-        for (_, recipe) in names {
+        for (name, recipe) in names {
+            let cook = |cooker, raw: RawCooking| {
+                Some(Cooking {
+                    name: name.clone(),
+                    cooker,
+                    ingredient: ingredient(&raw.ingredient)?,
+                    output: output(&raw.result)?,
+                    experience: raw.experience,
+                    time: raw.cookingtime,
+                })
+            };
             let parsed = match recipe {
+                RawRecipe::Smelting(raw) => {
+                    cooking.extend(cook(Cooker::Furnace, raw));
+                    continue;
+                }
+                RawRecipe::Smoking(raw) => {
+                    cooking.extend(cook(Cooker::Smoker, raw));
+                    continue;
+                }
+                RawRecipe::Blasting(raw) => {
+                    cooking.extend(cook(Cooker::BlastFurnace, raw));
+                    continue;
+                }
+                RawRecipe::Campfire(raw) => {
+                    cooking.extend(cook(Cooker::Campfire, raw));
+                    continue;
+                }
                 RawRecipe::Shaped {
                     key,
                     pattern,
@@ -142,7 +234,19 @@ impl Recipes {
             };
             recipes.extend(parsed);
         }
-        Ok(Self { recipes })
+        Ok(Self { recipes, cooking })
+    }
+
+    /// The cooking recipe for an item in a cooker, the first by name.
+    pub fn cook(&self, cooker: Cooker, item: i32) -> Option<&Cooking> {
+        self.cooking
+            .iter()
+            .find(|r| r.cooker == cooker && r.ingredient.contains(&item))
+    }
+
+    /// A cooking recipe by name, for the experience a furnace remembers.
+    pub fn cooking_named(&self, name: &str) -> Option<&Cooking> {
+        self.cooking.iter().find(|r| r.name == name)
     }
 
     /// What a square grid of `size`×`size` items (row by row) crafts.
@@ -279,5 +383,52 @@ mod tests {
 
         assert_eq!(recipes.craft(3, &[None; 9]), None);
         assert_eq!(recipes.craft(2, &[s, None, None, s]), None);
+    }
+
+    #[test]
+    fn cooking_recipes_by_cooker() {
+        use super::Cooker;
+        let data = GameData::load().unwrap();
+        let id = |name: &str| data.item_id(name).unwrap();
+        let recipes = &data.recipes;
+        let iron = recipes
+            .cook(Cooker::Furnace, id("minecraft:raw_iron"))
+            .unwrap();
+        assert_eq!(iron.output.item, id("minecraft:iron_ingot"));
+        assert_eq!((iron.time, iron.experience), (200, 0.7));
+        // Smokers only cook food, blast furnaces only ores and metal.
+        assert!(
+            recipes
+                .cook(Cooker::Smoker, id("minecraft:raw_iron"))
+                .is_none()
+        );
+        assert!(
+            recipes
+                .cook(Cooker::BlastFurnace, id("minecraft:raw_iron"))
+                .is_some()
+        );
+        assert!(recipes.cook(Cooker::Smoker, id("minecraft:beef")).is_some());
+        assert!(
+            recipes
+                .cook(Cooker::BlastFurnace, id("minecraft:beef"))
+                .is_none()
+        );
+        // Logs of any kind burn to charcoal, sand melts to glass.
+        assert_eq!(
+            recipes
+                .cook(Cooker::Furnace, id("minecraft:birch_log"))
+                .unwrap()
+                .output
+                .item,
+            id("minecraft:charcoal")
+        );
+        assert!(
+            recipes
+                .cook(Cooker::Furnace, id("minecraft:sand"))
+                .is_some()
+        );
+        let coal = data.item(id("minecraft:coal")).unwrap();
+        assert_eq!(coal.fuel, Some([(1600, 1.0), (800, 2.0)]));
+        assert!(data.item(id("minecraft:stone")).unwrap().fuel.is_none());
     }
 }

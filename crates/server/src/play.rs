@@ -128,6 +128,14 @@ pub async fn handle(
     let (ender, health) = saved
         .as_ref()
         .map_or((Vec::new(), MAX_HEALTH), |s| (s.ender.clone(), s.health));
+    let experience = saved
+        .as_ref()
+        .map_or_else(game::Experience::default, |s| game::Experience {
+            level: s.xp_level,
+            progress: s.xp_progress,
+            total: s.xp_total,
+            score: s.xp_score,
+        });
     let (pos, rot, inventory, game_mode) = match saved {
         Some(saved) => (
             saved.pos,
@@ -157,6 +165,7 @@ pub async fn handle(
         inventory: inventory.clone(),
         ender,
         health,
+        experience,
         skin_parts: information.as_ref().map_or(0, |i| i.model_customisation),
         main_hand: information.as_ref().map_or(1, |i| i.main_hand),
         outbound,

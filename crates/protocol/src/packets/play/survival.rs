@@ -206,3 +206,120 @@ pub const ANIMATE_CRITICAL_HIT: u8 = 1;
 /// `SoundSource.NEUTRAL` and `SoundSource.PLAYERS`.
 pub const SOUND_SOURCE_NEUTRAL: i32 = 6;
 pub const SOUND_SOURCE_PLAYERS: i32 = 7;
+/// `SoundSource.HOSTILE`.
+pub const SOUND_SOURCE_HOSTILE: i32 = 5;
+
+packet! {
+    /// `minecraft:set_experience`, clientbound: the bar and the level.
+    SetExperience = 0x69 {
+        progress: f32,
+        level: i32 as varint,
+        total: i32 as varint,
+    }
+}
+
+packet! {
+    /// `minecraft:container_set_data`, clientbound: one value of a screen,
+    /// such as a furnace's fire and progress.
+    ContainerSetData = 0x13 {
+        container_id: i32 as varint,
+        id: i16,
+        value: i16,
+    }
+}
+
+packet! {
+    /// `minecraft:change_difficulty`, clientbound: 0 peaceful to 3 hard.
+    ChangeDifficulty = 0x0a {
+        difficulty: i32 as varint,
+        locked: bool,
+    }
+}
+
+/// One kind of particle an explosion throws from the blocks it breaks, and
+/// how often (`ExplosionParticleInfo` in a `WeightedList`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExplosionParticle {
+    /// Network id in `minecraft:particle_type`, a particle without options.
+    pub particle: i32,
+    pub scaling: f32,
+    pub speed: f32,
+    pub weight: i32,
+}
+
+/// `minecraft:explode`, clientbound: the blast, its sound and particles,
+/// and how far it throws the receiving player.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Explode {
+    pub center: [f64; 3],
+    pub radius: f32,
+    pub block_count: i32,
+    pub knockback: Option<[f64; 3]>,
+    /// The big or small explosion particle, without options.
+    pub particle: i32,
+    /// `minecraft:sound_event` id + 1.
+    pub sound: i32,
+    pub block_particles: Vec<ExplosionParticle>,
+    pub play_sound: bool,
+}
+
+impl super::Packet for Explode {
+    const ID: i32 = 0x24;
+}
+
+impl Encode for Explode {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.center.iter().for_each(|v| v.encode(out));
+        self.radius.encode(out);
+        self.block_count.encode(out);
+        self.knockback.is_some().encode(out);
+        if let Some(k) = self.knockback {
+            k.iter().for_each(|v| v.encode(out));
+        }
+        VarInt(self.particle).encode(out);
+        VarInt(self.sound).encode(out);
+        VarInt(self.block_particles.len() as i32).encode(out);
+        for p in &self.block_particles {
+            VarInt(p.particle).encode(out);
+            p.scaling.encode(out);
+            p.speed.encode(out);
+            VarInt(p.weight).encode(out);
+        }
+        self.play_sound.encode(out);
+    }
+}
+
+impl Decode for Explode {
+    fn decode(buf: &mut &[u8]) -> Result<Self> {
+        let center = [f64::decode(buf)?, f64::decode(buf)?, f64::decode(buf)?];
+        let radius = f32::decode(buf)?;
+        let block_count = i32::decode(buf)?;
+        let knockback = if bool::decode(buf)? {
+            Some([f64::decode(buf)?, f64::decode(buf)?, f64::decode(buf)?])
+        } else {
+            None
+        };
+        let particle = VarInt::decode(buf)?.0;
+        let sound = VarInt::decode(buf)?.0;
+        let count = crate::codec::decode_count(buf, 64)?;
+        let mut block_particles = Vec::with_capacity(count);
+        for _ in 0..count {
+            block_particles.push(ExplosionParticle {
+                particle: VarInt::decode(buf)?.0,
+                scaling: f32::decode(buf)?,
+                speed: f32::decode(buf)?,
+                weight: VarInt::decode(buf)?.0,
+            });
+        }
+        Ok(Self {
+            center,
+            radius,
+            block_count,
+            knockback,
+            particle,
+            sound,
+            block_particles,
+            play_sound: bool::decode(buf)?,
+        })
+    }
+}

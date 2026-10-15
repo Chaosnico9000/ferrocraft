@@ -1,11 +1,13 @@
 //! Block entities: what blocks such as chests and signs hold beyond their
-//! state. Containers keep their items, signs their text. What vanilla stored
-//! and Ferrocraft does not model stays as it was loaded.
+//! state. Containers keep their items, signs their text, furnaces their fire
+//! and progress. What vanilla stored and Ferrocraft does not model stays as
+//! it was loaded.
 
 use ferrocraft_protocol::Nbt;
 use ferrocraft_protocol::codec::BlockPos;
 use ferrocraft_protocol::packets::play::ItemStack;
 
+use crate::crafting::Cooker;
 use crate::data::GameData;
 use crate::storage::{item_from_nbt, item_to_nbt};
 
@@ -40,6 +42,42 @@ fn is_sign(kind: &str) -> bool {
     matches!(kind, "minecraft:sign" | "minecraft:hanging_sign")
 }
 
+/// What a furnace, smoker or blast furnace keeps besides its three slots
+/// (`AbstractFurnaceBlockEntity`): the fuel burning, the cooking, and the
+/// recipes done since someone last took out the result, for experience.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Furnace {
+    pub lit_remaining: i32,
+    pub lit_total: i32,
+    pub cooking: i32,
+    pub cooking_total: i32,
+    pub speed: f32,
+    pub recipes_used: Vec<(String, i32)>,
+}
+
+impl Default for Furnace {
+    fn default() -> Self {
+        Self {
+            lit_remaining: 0,
+            lit_total: 0,
+            cooking: 0,
+            cooking_total: 0,
+            speed: 1.0,
+            recipes_used: Vec::new(),
+        }
+    }
+}
+
+/// Keys of a furnace's saved data.
+const FURNACE_KEYS: [&str; 6] = [
+    "cooking_time_spent",
+    "cooking_total_time",
+    "lit_time_remaining",
+    "lit_total_time",
+    "speed_multiplier",
+    "RecipesUsed",
+];
+
 /// Keys every saved block entity has, which the client is not sent.
 const POSITION_KEYS: [&str; 5] = ["id", "x", "y", "z", "keepPacked"];
 
@@ -52,6 +90,7 @@ pub struct BlockEntity {
     /// Front and back of a sign.
     pub sign: Option<[Nbt; 2]>,
     pub waxed: bool,
+    pub furnace: Option<Furnace>,
     /// As loaded, for everything Ferrocraft does not model.
     stored: Option<Nbt>,
     /// Changed since it was loaded.
@@ -65,6 +104,7 @@ impl BlockEntity {
             items: vec![None; container_size(kind)],
             sign: is_sign(kind).then(|| [empty_side(), empty_side()]),
             waxed: false,
+            furnace: Cooker::of(kind).map(|_| Furnace::default()),
             stored: None,
             modified: true,
         }
@@ -103,6 +143,28 @@ impl BlockEntity {
             }
             entity.waxed = nbt.get("is_waxed") == Some(&Nbt::Byte(1));
         }
+        if let Some(furnace) = &mut entity.furnace {
+            let int = |key| match nbt.get(key) {
+                Some(Nbt::Int(v)) => *v,
+                _ => 0,
+            };
+            furnace.cooking = int("cooking_time_spent");
+            furnace.cooking_total = int("cooking_total_time");
+            furnace.lit_remaining = int("lit_time_remaining");
+            furnace.lit_total = int("lit_total_time");
+            if let Some(Nbt::Float(speed)) = nbt.get("speed_multiplier") {
+                furnace.speed = *speed;
+            }
+            if let Some(Nbt::Compound(used)) = nbt.get("RecipesUsed") {
+                furnace.recipes_used = used
+                    .iter()
+                    .filter_map(|(name, count)| match count {
+                        Nbt::Int(count) => Some((name.clone(), *count)),
+                        _ => None,
+                    })
+                    .collect();
+            }
+        }
         entity.stored = Some(nbt);
         entity.modified = false;
         Some((pos, entity))
@@ -121,6 +183,7 @@ impl BlockEntity {
                         k.as_str(),
                         "Items" | "front_text" | "back_text" | "is_waxed"
                     ) && !POSITION_KEYS.contains(&k.as_str())
+                        && !FURNACE_KEYS.contains(&k.as_str())
                 })
                 .cloned()
                 .collect(),
@@ -151,6 +214,23 @@ impl BlockEntity {
                 .collect();
             entries.push(("Items".into(), Nbt::List(items)));
         }
+        if let Some(furnace) = &self.furnace {
+            entries.push(("cooking_time_spent".into(), Nbt::Int(furnace.cooking)));
+            entries.push(("cooking_total_time".into(), Nbt::Int(furnace.cooking_total)));
+            entries.push(("lit_time_remaining".into(), Nbt::Int(furnace.lit_remaining)));
+            entries.push(("lit_total_time".into(), Nbt::Int(furnace.lit_total)));
+            entries.push(("speed_multiplier".into(), Nbt::Float(furnace.speed)));
+            entries.push((
+                "RecipesUsed".into(),
+                Nbt::Compound(
+                    furnace
+                        .recipes_used
+                        .iter()
+                        .map(|(name, count)| (name.clone(), Nbt::Int(*count)))
+                        .collect(),
+                ),
+            ));
+        }
         if let Some([front, back]) = &self.sign {
             entries.push(("front_text".into(), front.clone()));
             entries.push(("back_text".into(), back.clone()));
@@ -179,6 +259,36 @@ impl BlockEntity {
                     .collect(),
             )),
             _ => None,
+        }
+    }
+
+    /// Puts a stack into a slot (`Container.setItem`). A furnace starts
+    /// cooking anew when a different item goes in (`setItem` of
+    /// `AbstractFurnaceBlockEntity`).
+    pub fn set_item(&mut self, slot: usize, stack: Option<ItemStack>, data: &GameData) {
+        let Some(target) = self.items.get_mut(slot) else {
+            return;
+        };
+        let same = match (&stack, &*target) {
+            (Some(new), Some(old)) => new.item == old.item && new.patch == old.patch,
+            _ => false,
+        };
+        *target = stack;
+        self.modified = true;
+        if slot != 0 || same {
+            return;
+        }
+        let item = self.items[0].as_ref().map(|s| s.item);
+        if let (Some(furnace), Some(cooker)) = (&mut self.furnace, Cooker::of(&self.kind)) {
+            let time = item
+                .and_then(|item| data.recipes.cook(cooker, item))
+                .map_or(200, |r| r.time);
+            furnace.cooking_total = if furnace.speed > 0.0 {
+                (time as f32 / furnace.speed).ceil() as i32
+            } else {
+                time
+            };
+            furnace.cooking = 0;
         }
     }
 
@@ -238,6 +348,21 @@ mod tests {
         assert_eq!(loaded.sign, sign.sign);
         let tag = loaded.update_tag().unwrap();
         assert!(tag.get("front_text").is_some());
+
+        // A furnace keeps its fire and what it has cooked.
+        let mut furnace = BlockEntity::new("minecraft:smoker");
+        let state = Furnace {
+            lit_remaining: 700,
+            lit_total: 800,
+            cooking: 12,
+            cooking_total: 100,
+            speed: 2.0,
+            recipes_used: vec![("minecraft:cooked_beef_from_smoking".into(), 3)],
+        };
+        furnace.furnace = Some(state.clone());
+        let (_, loaded) = BlockEntity::from_nbt(furnace.to_nbt(pos, &data), &data).unwrap();
+        assert_eq!(loaded.furnace, Some(state));
+        assert_eq!(loaded.items.len(), 3);
 
         // A block entity Ferrocraft does not know keeps everything.
         let banner = Nbt::Compound(vec![

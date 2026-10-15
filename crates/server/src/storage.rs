@@ -1,8 +1,9 @@
 //! The world on disk, in vanilla 26.3's formats and layout, so that vanilla
 //! and its tools can read it: Anvil region files
 //! (`dimensions/minecraft/overworld/region/r.<x>.<z>.mca`) for chunks and
-//! gzipped NBT (`players/data/<uuid>.dat`) for players. Only chunks that
-//! differ from the superflat template are written; the rest is generated.
+//! (`.../entities/r.<x>.<z>.mca`) for the entities in them, gzipped NBT
+//! (`players/data/<uuid>.dat`) for players. Only chunks that differ from the
+//! superflat template are written; the rest is generated.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -17,7 +18,7 @@ use ferrocraft_protocol::packets::play::{ComponentPatch, ItemStack};
 use flate2::Compression;
 use flate2::read::{GzDecoder, ZlibDecoder};
 use flate2::write::{GzEncoder, ZlibEncoder};
-use tracing::warn;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::block_entity::BlockEntity;
@@ -62,12 +63,14 @@ pub struct StoredChunk {
 /// Where 26.3 keeps the overworld's chunks and the players
 /// (`LevelResource`, `DimensionType.getStorageFolder`).
 const REGION_DIR: &str = "dimensions/minecraft/overworld/region";
+const ENTITY_DIR: &str = "dimensions/minecraft/overworld/entities";
 const PLAYER_DIR: &str = "players/data";
 
 #[derive(Debug)]
 pub struct Storage {
     dir: PathBuf,
     regions: PathBuf,
+    entities: PathBuf,
     players: PathBuf,
 }
 
@@ -76,9 +79,10 @@ impl Storage {
         let storage = Self {
             dir: dir.to_owned(),
             regions: dir.join(REGION_DIR),
+            entities: dir.join(ENTITY_DIR),
             players: dir.join(PLAYER_DIR),
         };
-        for sub in [&storage.regions, &storage.players] {
+        for sub in [&storage.regions, &storage.entities, &storage.players] {
             std::fs::create_dir_all(sub).with_context(|| format!("creating {}", sub.display()))?;
         }
         Ok(storage)
@@ -88,11 +92,15 @@ impl Storage {
         self.regions.join(format!("r.{x}.{z}.mca"))
     }
 
-    /// Every chunk in the region files. Blocks this version does not know
-    /// become air.
+    /// Every finished chunk in the region files. Blocks this version does
+    /// not know become air. Chunks vanilla only began to generate (a
+    /// `Status` short of `minecraft:full`, which it keeps around the
+    /// explored area) are left out: they hold no blocks yet and are
+    /// generated like any other.
     pub fn load_chunks(&self, data: &GameData) -> anyhow::Result<Vec<StoredChunk>> {
         let mut chunks = Vec::new();
         let mut unknown = BTreeMap::new();
+        let mut unfinished = 0;
         for entry in std::fs::read_dir(&self.regions)? {
             let path = entry?.path();
             let Some(region) = parse_region_name(&path) else {
@@ -102,8 +110,17 @@ impl Storage {
                 let nbt = Nbt::read_named(&mut raw.as_slice())
                     .with_context(|| format!("chunk in {}", path.display()))?
                     .1;
+                if let Some(Nbt::String(status)) = nbt.get("Status")
+                    && !matches!(status.as_str(), "minecraft:full" | "full")
+                {
+                    unfinished += 1;
+                    continue;
+                }
                 chunks.push(chunk_from_nbt(nbt, data, &mut unknown)?);
             }
+        }
+        if unfinished > 0 {
+            debug!(unfinished, "left out chunks vanilla had not finished");
         }
         if !unknown.is_empty() {
             warn!(?unknown, "unknown blocks in the saved world became air");
@@ -124,6 +141,55 @@ impl Storage {
             encoded.push((*pos, nbt));
         }
         let path = self.region_path(region);
+        write_atomically(&path, &region_file(&encoded)?, false)
+    }
+
+    /// Every chunk of the entity regions, with its position: `{DataVersion,
+    /// Position, Entities}` (`EntityStorage`).
+    pub fn load_entity_chunks(&self) -> anyhow::Result<Vec<(ChunkPos, Nbt)>> {
+        let mut chunks = Vec::new();
+        for entry in std::fs::read_dir(&self.entities)? {
+            let path = entry?.path();
+            let Some(region) = parse_region_name(&path) else {
+                continue;
+            };
+            for raw in read_region(&path, region)? {
+                let nbt = Nbt::read_named(&mut raw.as_slice())
+                    .with_context(|| format!("entities in {}", path.display()))?
+                    .1;
+                match nbt.get("Position") {
+                    Some(Nbt::IntArray(pos)) if pos.len() == 2 => {
+                        chunks.push(((pos[0], pos[1]), nbt));
+                    }
+                    _ => warn!("{}: an entity chunk without a position", path.display()),
+                }
+            }
+        }
+        Ok(chunks)
+    }
+
+    /// Writes an entity region with exactly these chunks; one without any
+    /// goes away.
+    pub fn write_entity_region(
+        &self,
+        region: (i32, i32),
+        chunks: &[(ChunkPos, Nbt)],
+    ) -> anyhow::Result<()> {
+        let path = self
+            .entities
+            .join(format!("r.{}.{}.mca", region.0, region.1));
+        if chunks.is_empty() {
+            return match std::fs::remove_file(&path) {
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err.into()),
+                _ => Ok(()),
+            };
+        }
+        let mut encoded = Vec::new();
+        for (pos, chunk) in chunks {
+            let mut nbt = Vec::new();
+            chunk.write_named("", &mut nbt);
+            encoded.push((*pos, nbt));
+        }
         write_atomically(&path, &region_file(&encoded)?, false)
     }
 
@@ -687,6 +753,11 @@ pub struct PlayerData {
     /// The ender chest, by slot 0–26.
     pub ender: Vec<(usize, ItemStack)>,
     pub health: f32,
+    /// Experience: level, progress to the next, total and score.
+    pub xp_level: i32,
+    pub xp_progress: f32,
+    pub xp_total: i32,
+    pub xp_score: i32,
 }
 
 /// A player's full health.
@@ -751,6 +822,10 @@ impl PlayerData {
             ("equipment".into(), Nbt::Compound(equipment)),
             ("EnderItems".into(), Nbt::List(ender)),
             ("Health".into(), Nbt::Float(self.health)),
+            ("XpLevel".into(), Nbt::Int(self.xp_level)),
+            ("XpP".into(), Nbt::Float(self.xp_progress)),
+            ("XpTotal".into(), Nbt::Int(self.xp_total)),
+            ("Score".into(), Nbt::Int(self.xp_score)),
         ])
     }
 
@@ -823,7 +898,21 @@ impl PlayerData {
                 Some(Nbt::Float(health)) if health.is_finite() => health.clamp(0.0, MAX_HEALTH),
                 _ => MAX_HEALTH,
             },
+            xp_level: int_or_zero(nbt, "XpLevel").max(0),
+            xp_progress: match nbt.get("XpP") {
+                Some(Nbt::Float(p)) if p.is_finite() => p.clamp(0.0, 1.0),
+                _ => 0.0,
+            },
+            xp_total: int_or_zero(nbt, "XpTotal").max(0),
+            xp_score: int_or_zero(nbt, "Score"),
         }
+    }
+}
+
+fn int_or_zero(nbt: &Nbt, key: &str) -> i32 {
+    match nbt.get(key) {
+        Some(Nbt::Int(v)) => *v,
+        _ => 0,
     }
 }
 
@@ -1148,6 +1237,10 @@ mod tests {
             game_mode: 3,
             ender: vec![(26, stack(2, 7))],
             health: 13.5,
+            xp_level: 7,
+            xp_progress: 0.25,
+            xp_total: 91,
+            xp_score: 91,
             inventory: vec![
                 (36, stack(1, 64)),
                 (20, stack(2, 3)),
@@ -1171,6 +1264,34 @@ mod tests {
         let mut expected = player.clone();
         expected.inventory.sort_by_key(|(slot, _)| *slot);
         assert_eq!(loaded, expected);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unfinished_chunks_are_left_out() {
+        let data = GameData::load().unwrap();
+        let dir = temp_dir("unfinished");
+        let storage = Storage::open(&dir).unwrap();
+        let states = mixed_chunk(&data);
+        let Nbt::Compound(mut proto) = chunk_to_nbt((1, 1), &states, Vec::new(), None, &data)
+        else {
+            panic!()
+        };
+        for (key, value) in &mut proto {
+            if key == "Status" {
+                *value = Nbt::String("minecraft:structure_starts".into());
+            }
+        }
+        let chunks = vec![
+            (
+                (0, 0),
+                chunk_to_nbt((0, 0), &states, Vec::new(), None, &data),
+            ),
+            ((1, 1), Nbt::Compound(proto)),
+        ];
+        storage.write_region((0, 0), &chunks).unwrap();
+        let loaded = storage.load_chunks(&data).unwrap();
+        assert_eq!(loaded.iter().map(|c| c.pos).collect::<Vec<_>>(), [(0, 0)]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

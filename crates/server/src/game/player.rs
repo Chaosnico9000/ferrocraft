@@ -80,6 +80,21 @@ pub struct Player {
     pub using: Option<Using>,
     /// Game tick of the last swing, from which the next one charges.
     pub last_swing: u64,
+    pub experience: Experience,
+    /// Ticks until the next experience orb can be taken.
+    pub xp_delay: u32,
+    /// Game tick of the last fanfare for a new level.
+    pub last_level_up: u64,
+}
+
+/// A player's experience: the level, the way to the next as a fraction,
+/// all points ever collected since the last death, and the score.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Experience {
+    pub level: i32,
+    pub progress: f32,
+    pub total: i32,
+    pub score: i32,
 }
 
 /// Slots of the ender chest.
@@ -168,6 +183,10 @@ impl Player {
                 .filter_map(|(slot, stack)| Some((slot, stack.clone()?)))
                 .collect(),
             health: self.health,
+            xp_level: self.experience.level,
+            xp_progress: self.experience.progress,
+            xp_total: self.experience.total,
+            xp_score: self.experience.score,
         }
     }
 

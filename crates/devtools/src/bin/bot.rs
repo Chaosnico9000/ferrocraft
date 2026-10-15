@@ -3,7 +3,7 @@
 //! and taking items needs creative mode.
 //!
 //!   bot <addr> [--count N] [--name Bot] [--radius 3] [--seconds S]
-//!       [--roles walk,build,house,throw]
+//!       [--roles walk,build,house,throw,idle] [--commands "time set night;summon cow"]
 //!
 //! With `--count` above 1 the bots are called `<name>1`, `<name>2`, ... and
 //! take the roles in turn:
@@ -14,8 +14,11 @@
 //!   it down again.
 //! - `house`: sets up a chest, a door and a lever and keeps using them.
 //! - `throw`: walks back and forth throwing items and picks them up again.
+//! - `idle`: stands still and keeps quiet.
 //!
-//! Everyone says something in the chat now and then.
+//! The others say something in the chat now and then. With `--commands`,
+//! each bot first runs these commands (it needs to be an operator) and
+//! prints the answers.
 
 use std::collections::HashMap;
 use std::f64::consts::{PI, TAU};
@@ -29,11 +32,11 @@ use ferrocraft_protocol::Nbt;
 use ferrocraft_protocol::codec::BlockPos;
 use ferrocraft_protocol::packets::Packet;
 use ferrocraft_protocol::packets::play::{
-    AcceptTeleportation, Chat, ChunkBatchFinished, ChunkBatchReceived, ClientTickEnd,
+    AcceptTeleportation, Chat, ChatCommand, ChunkBatchFinished, ChunkBatchReceived, ClientTickEnd,
     ClientboundKeepAlive, ComponentPatch, Disconnect, ItemStack, MovePlayer, OpenScreen,
     PlayerAction, PlayerInput, PlayerLoaded, PlayerPosition, Punch, ServerboundContainerClose,
-    ServerboundKeepAlive, SetCarriedItem, SetCreativeModeSlot, UntrustedSlot, UseItemOn,
-    player_action,
+    ServerboundKeepAlive, SetCarriedItem, SetCreativeModeSlot, SystemChat, UntrustedSlot,
+    UseItemOn, player_action,
 };
 use rand::rngs::StdRng;
 use rand::seq::IndexedRandom;
@@ -108,6 +111,7 @@ enum Role {
     Build,
     House,
     Throw,
+    Idle,
 }
 
 impl Role {
@@ -117,6 +121,7 @@ impl Role {
             "build" => Self::Build,
             "house" => Self::House,
             "throw" => Self::Throw,
+            "idle" => Self::Idle,
             _ => bail!("unknown role {name}"),
         })
     }
@@ -129,12 +134,13 @@ struct Options {
     radius: f64,
     seconds: Option<f64>,
     roles: Vec<Role>,
+    commands: Vec<String>,
 }
 
 fn parse() -> anyhow::Result<Options> {
     let mut args = std::env::args().skip(1);
     let usage = "usage: bot <addr> [--count N] [--name Bot] [--radius 3] [--seconds S] \
-                 [--roles walk,build,house,throw]";
+                 [--roles walk,build,house,throw,idle] [--commands \"a;b\"]";
     let addr = args.next().context(usage)?;
     let mut options = Options {
         addr: addr
@@ -146,6 +152,7 @@ fn parse() -> anyhow::Result<Options> {
         radius: 3.0,
         seconds: None,
         roles: vec![Role::Walk, Role::Build, Role::House, Role::Throw],
+        commands: Vec::new(),
     };
     while let Some(arg) = args.next() {
         let mut value = || args.next().with_context(|| format!("{arg} needs a value"));
@@ -154,6 +161,13 @@ fn parse() -> anyhow::Result<Options> {
             "--name" => options.name = value()?,
             "--radius" => options.radius = value()?.parse()?,
             "--seconds" => options.seconds = Some(value()?.parse()?),
+            "--commands" => {
+                options.commands = value()?
+                    .split(';')
+                    .map(|c| c.trim().trim_start_matches('/').to_owned())
+                    .filter(|c| !c.is_empty())
+                    .collect();
+            }
             "--roles" => {
                 options.roles = value()?
                     .split(',')
@@ -169,9 +183,18 @@ fn parse() -> anyhow::Result<Options> {
     Ok(options)
 }
 
+/// A text component in short: its text, or a translation key with its
+/// arguments.
 fn text(nbt: &Nbt) -> String {
-    match nbt.get("text") {
-        Some(Nbt::String(text)) => text.clone(),
+    match (nbt, nbt.get("text"), nbt.get("translate")) {
+        (Nbt::String(text), ..) | (_, Some(Nbt::String(text)), _) => text.clone(),
+        (_, _, Some(Nbt::String(key))) => match nbt.get("with") {
+            Some(Nbt::List(with)) if !with.is_empty() => {
+                let args: Vec<String> = with.iter().map(text).collect();
+                format!("{key} [{}]", args.join(", "))
+            }
+            _ => key.clone(),
+        },
         _ => format!("{nbt:?}"),
     }
 }
@@ -240,6 +263,8 @@ struct Bot {
     screen: Option<(i32, u64)>,
     sneaking: bool,
     thrown: u32,
+    /// Commands still to run.
+    commands: Vec<String>,
 }
 
 impl Bot {
@@ -417,6 +442,16 @@ impl Bot {
 
     async fn act(&mut self) {
         self.tick += 1;
+        // The commands first, one a tick.
+        if !self.commands.is_empty() {
+            let command = self.commands.remove(0);
+            println!("{}: /{command}", self.name);
+            self.client.send(&ChatCommand { command }).await;
+            return;
+        }
+        if self.role == Role::Idle {
+            return;
+        }
         if self.chat_in == 0 {
             self.chat().await;
             self.chat_in = self.rng.random_range(900..2400);
@@ -427,6 +462,7 @@ impl Bot {
             Role::Build => self.build().await,
             Role::House => self.keep_house().await,
             Role::Throw => self.throw().await,
+            Role::Idle => {}
         }
         self.send_movement().await;
         self.client.send(&ClientTickEnd).await;
@@ -628,7 +664,9 @@ async fn run(
     radius: f64,
     phase: f64,
     until: Option<Instant>,
+    commands: Vec<String>,
 ) {
+    let answers = !commands.is_empty();
     let (mut client, finished) = Client::login(addr, &name).await;
     println!("{name}: logged in as {} ({role:?})", finished.profile.uuid);
     client.configure(4).await;
@@ -656,6 +694,7 @@ async fn run(
         screen: None,
         sneaking: false,
         thrown: 0,
+        commands,
     };
     let mut placed = false;
     let mut ticks = tokio::time::interval(Duration::from_millis(50));
@@ -706,6 +745,11 @@ async fn run(
                     ChunkBatchFinished::ID => {
                         bot.client.send(&ChunkBatchReceived { desired_chunks_per_tick: 25.0 }).await;
                     }
+                    SystemChat::ID if answers => {
+                        if let Ok(chat) = SystemChat::from_raw(&raw) {
+                            println!("{}: {}", bot.name, text(&chat.content));
+                        }
+                    }
                     Disconnect::ID => {
                         let bye = Disconnect::from_raw(&raw).unwrap();
                         println!("{}: kicked: {}", bot.name, text(&bye.reason));
@@ -738,7 +782,15 @@ async fn main() -> anyhow::Result<()> {
         };
         let role = options.roles[i % options.roles.len()];
         let phase = TAU * i as f64 / options.count as f64;
-        bots.spawn(run(options.addr, name, role, options.radius, phase, until));
+        bots.spawn(run(
+            options.addr,
+            name,
+            role,
+            options.radius,
+            phase,
+            until,
+            options.commands.clone(),
+        ));
         // Vanilla throttles logins from one address.
         tokio::time::sleep(Duration::from_millis(200)).await;
     }

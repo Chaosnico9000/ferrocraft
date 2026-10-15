@@ -418,7 +418,26 @@ impl Game {
             "minecraft:dispenser" => ("minecraft:generic_3x3", "container.dispenser"),
             "minecraft:dropper" => ("minecraft:generic_3x3", "container.dropper"),
             "minecraft:hopper" => ("minecraft:hopper", "container.hopper"),
-            // Furnaces, brewing stands and the rest have screens of their own.
+            "minecraft:furnace" | "minecraft:smoker" | "minecraft:blast_furnace" => {
+                let Some(cooker) = crate::crafting::Cooker::of(kind) else {
+                    return false;
+                };
+                let (menu_type, title) = match cooker {
+                    crate::crafting::Cooker::Smoker => ("minecraft:smoker", "container.smoker"),
+                    crate::crafting::Cooker::BlastFurnace => {
+                        ("minecraft:blast_furnace", "container.blast_furnace")
+                    }
+                    _ => ("minecraft:furnace", "container.furnace"),
+                };
+                if self.context.world.block_entity(pos).is_none() {
+                    return false;
+                }
+                let mut menu = Menu::furnace(0, pos, cooker);
+                menu.block = Some(block_id);
+                self.open_menu(entity_id, menu, menu_type, title);
+                return true;
+            }
+            // Brewing stands and the rest have screens of their own.
             _ => return false,
         };
         if size == 0 || self.context.world.block_entity(pos).is_none() {
@@ -644,9 +663,21 @@ impl Game {
     }
 
     /// Breaks a block, and the other half of a door or bed with it; a
-    /// container's content falls out, the other half of a double chest
-    /// becomes single. Returns the positions that changed.
+    /// container's content falls out, a furnace pays out its experience,
+    /// the other half of a double chest becomes single. Returns the
+    /// positions that changed.
     pub(super) fn break_block(&mut self, pos: BlockPos, breaker: Option<i32>) -> Vec<BlockPos> {
+        self.remove_block(pos, breaker, true)
+    }
+
+    /// [`break_block`](Self::break_block), with or without the particles
+    /// and sound of breaking; explosions have their own.
+    pub(super) fn remove_block(
+        &mut self,
+        pos: BlockPos,
+        breaker: Option<i32>,
+        effects: bool,
+    ) -> Vec<BlockPos> {
         let removed = self.removal(pos);
         if removed[0].1 == self.air {
             return vec![pos];
@@ -655,6 +686,14 @@ impl Game {
         let mut chest = None;
         for &(at, state) in &removed {
             if let Some(entity) = self.context.world.block_entity(at) {
+                if entity.furnace.is_some() {
+                    let center = [
+                        f64::from(at.x) + 0.5,
+                        f64::from(at.y) + 0.5,
+                        f64::from(at.z) + 0.5,
+                    ];
+                    self.furnace_experience(at, center);
+                }
                 contents.extend(entity.items.into_iter().flatten().map(|s| (at, s)));
             }
             if let Some((_, block)) = self.context.data.block_of(state)
@@ -675,7 +714,9 @@ impl Game {
                 self.set_block(other, single);
             }
         }
-        self.break_effect(breaker, pos, removed[0].1);
+        if effects {
+            self.break_effect(breaker, pos, removed[0].1);
+        }
         for (at, stack) in contents {
             self.pop_resource(at, stack);
         }

@@ -12,10 +12,14 @@ use ferrocraft_protocol::packets::play::{
 };
 use uuid::Uuid;
 
+use ferrocraft_protocol::Nbt;
+
+use super::mob::save::{doubles, read_doubles, uuid_from_nbt, uuid_to_nbt};
 use super::physics;
 use super::tracker::{Pose, Tracker};
 use super::{Encoded, EntityState, Game, Outbound};
-use crate::data::Aabb;
+use crate::data::{Aabb, GameData};
+use crate::storage::{item_from_nbt, item_to_nbt};
 
 /// Items are seen up to 6 chunks away and updated once a second
 /// (`EntityTypes.ITEM`).
@@ -95,6 +99,34 @@ impl ItemEntity {
         });
         self.state = Some(Arc::clone(&state));
         state
+    }
+
+    /// `ItemEntity.addAdditionalSaveData` after the entity's own.
+    pub fn to_nbt(&self, data: &GameData) -> Nbt {
+        let mut entries = vec![
+            ("id".to_owned(), Nbt::String("minecraft:item".into())),
+            ("Pos".into(), doubles(&self.pos)),
+            ("Motion".into(), doubles(&self.velocity)),
+            (
+                "Rotation".into(),
+                Nbt::List(vec![Nbt::Float(0.0), Nbt::Float(0.0)]),
+            ),
+            ("OnGround".into(), Nbt::Byte(i8::from(self.on_ground))),
+            ("UUID".into(), uuid_to_nbt(self.uuid)),
+            ("Health".into(), Nbt::Short(5)),
+            (
+                "Age".into(),
+                Nbt::Short(self.age.clamp(-32768, 32767) as i16),
+            ),
+            (
+                "PickupDelay".into(),
+                Nbt::Short(self.pickup_delay.clamp(0, 32767) as i16),
+            ),
+        ];
+        if let Some(item) = item_to_nbt(&self.stack, data) {
+            entries.push(("Item".into(), item));
+        }
+        Nbt::Compound(entries)
     }
 
     fn mergeable(&self, max: i32) -> bool {
@@ -205,7 +237,49 @@ impl Game {
         self.spawn_item(at, velocity, stack, 10);
     }
 
-    fn remove_item(&mut self, entity_id: i32) {
+    /// An item entity from the entity store.
+    pub(super) fn revive_item(&mut self, entity_id: i32, nbt: &Nbt) {
+        let data = Arc::clone(&self.context.data);
+        let (Some(pos), Some(stack)) = (
+            read_doubles(nbt, "Pos"),
+            nbt.get("Item").and_then(|i| item_from_nbt(i, &data)),
+        ) else {
+            return;
+        };
+        let short = |key| match nbt.get(key) {
+            Some(Nbt::Short(v)) => i32::from(*v),
+            _ => 0,
+        };
+        let velocity = read_doubles(nbt, "Motion").unwrap_or_default();
+        let pose = Pose {
+            pos,
+            yaw: 0.0,
+            pitch: 0.0,
+            head_yaw: 0.0,
+            on_ground: false,
+        };
+        let mut item = ItemEntity {
+            entity_id,
+            uuid: uuid_from_nbt(nbt).unwrap_or_else(Uuid::new_v4),
+            stack,
+            pos,
+            velocity,
+            on_ground: matches!(nbt.get("OnGround"), Some(Nbt::Byte(1))),
+            pickup_delay: short("PickupDelay"),
+            age: short("Age"),
+            tick_count: 0,
+            tracker: Tracker::new(&pose, ITEM_UPDATE_INTERVAL),
+            sent_velocity: velocity,
+            needs_sync: false,
+            stack_dirty: false,
+            state: None,
+        };
+        let state = item.state(self.item_type);
+        self.items.insert(entity_id, item);
+        self.broadcast(None, &Outbound::EntityAdded(state));
+    }
+
+    pub(super) fn remove_item(&mut self, entity_id: i32) {
         if self.items.remove(&entity_id).is_some() {
             self.broadcast(None, &Outbound::EntityRemoved(entity_id));
         }

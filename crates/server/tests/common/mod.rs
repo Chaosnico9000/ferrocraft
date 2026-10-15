@@ -43,8 +43,10 @@ pub fn test_config() -> Config {
         world: String::new(),
         online_mode: false,
         game_mode: "creative".into(),
-        // Tests that want animals spawn them themselves.
+        // Tests that want mobs summon them themselves.
         animals: false,
+        monsters: false,
+        difficulty: "normal".into(),
         ..Config::default()
     }
 }

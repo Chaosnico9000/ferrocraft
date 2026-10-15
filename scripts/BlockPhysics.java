@@ -1,6 +1,6 @@
 // Dumps what the vanilla server knows about every block state but no report
-// of Mojang's data generator contains: light, hardness, collision and block
-// entities. Run by gen-reports.sh against the unpacked server jar:
+// of Mojang's data generator contains: light, hardness, explosion
+// resistance, collision, where monsters may spawn and block entities. Run by gen-reports.sh against the unpacked server jar:
 //   java -cp '<server jar>:<libraries>/*' scripts/BlockPhysics.java out.json
 // Ferrocraft reads the result through gen-data; the server itself stays Rust.
 
@@ -21,6 +21,7 @@ import net.minecraft.server.Bootstrap;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.EntityBlock;
+import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.lighting.LightEngine;
 import net.minecraft.world.level.material.Fluids;
@@ -74,6 +75,7 @@ public class BlockPhysics {
             out.addProperty("item", BuiltInRegistries.ITEM.getKey(block.asItem()).toString());
             out.addProperty("hardness", first.getDestroySpeed(level, pos));
             out.addProperty("requires_tool", first.requiresCorrectToolForDrops());
+            out.addProperty("explosion_resistance", block.getExplosionResistance());
             if (block instanceof EntityBlock) {
                 // Asking the types avoids constructing block entities, some of
                 // which need more of the game than the bootstrap sets up.
@@ -85,7 +87,9 @@ public class BlockPhysics {
             }
             // Per state, in state id order: emission, dampening, sky light
             // passes down, collision shape, the six face occlusion shapes for
-            // light (down, up, north, south, west, east), fluid.
+            // light (down, up, north, south, west, east), fluid, whether a
+            // zombie may spawn on top (`isValidSpawn`, the rule most monsters
+            // share).
             JsonArray states = new JsonArray();
             List<String> seen = new ArrayList<>();
             for (BlockState state : block.getStateDefinition().getPossibleStates()) {
@@ -99,6 +103,7 @@ public class BlockPhysics {
                 }
                 var fluid = state.getFluidState();
                 s.add(fluid.isEmpty() ? 0 : fluid.getType().isSame(Fluids.WATER) ? 1 : 2);
+                s.add(state.isValidSpawn(level, pos, EntityTypes.ZOMBIE));
                 states.add(s);
                 seen.add(s.toString());
             }

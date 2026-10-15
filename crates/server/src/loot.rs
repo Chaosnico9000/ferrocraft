@@ -1,8 +1,9 @@
 //! What a broken block or a killed mob drops: vanilla's loot tables
 //! (`data/minecraft/loot_table/blocks` and `entities`), evaluated like
 //! `LootTable.getRandomItems`.
-//! Enchantments and explosions do not exist here, so silk touch never
-//! applies, fortune is level 0 and everything survives.
+//! Enchantments do not exist here, so silk touch never applies and fortune
+//! and looting are level 0. Explosions let each drop survive with a chance
+//! of one in their radius.
 
 use std::collections::HashMap;
 
@@ -88,6 +89,9 @@ enum Predicate {
     },
     #[serde(rename = "minecraft:killed_by_player")]
     KilledByPlayer,
+    /// A chance that looting would raise, here always the plain one.
+    #[serde(rename = "minecraft:random_chance_with_enchanted_bonus")]
+    RandomChanceWithEnchantedBonus { unenchanted_chance: f32 },
     #[serde(other)]
     Unknown,
 }
@@ -187,8 +191,14 @@ enum Function {
         parameters: Option<BonusParameters>,
         condition: Option<Condition>,
     },
-    /// Explosion decay, copying components or state into the item: nothing
-    /// that changes the drop here.
+    /// Each item survives an explosion with a chance of one in its radius.
+    #[serde(rename = "minecraft:explosion_decay")]
+    ExplosionDecay,
+    /// What the item would cook to in a furnace, e.g. for a burning cow.
+    #[serde(rename = "minecraft:furnace_smelt")]
+    FurnaceSmelt { condition: Option<Condition> },
+    /// Looting, copying components or state into the item: nothing that
+    /// changes the drop here.
     #[serde(other)]
     Ignored,
 }
@@ -278,6 +288,7 @@ pub struct EntityFacts<'a> {
     pub sheep_color: Option<&'a str>,
     pub sheared: bool,
     pub baby: bool,
+    pub on_fire: bool,
 }
 
 /// What an entry stands for once its conditions hold.
@@ -332,6 +343,8 @@ pub struct Context<'a> {
     pub entity: Option<EntityFacts<'a>>,
     /// A player broke the block or killed the entity.
     pub by_player: bool,
+    /// The radius of the explosion that broke the block.
+    pub explosion: Option<f32>,
 }
 
 impl Context<'_> {
@@ -352,8 +365,13 @@ impl Context<'_> {
             Condition::Inline(predicate) => predicate,
         };
         match &**predicate {
-            Predicate::SurvivesExplosion => true,
+            Predicate::SurvivesExplosion => self
+                .explosion
+                .is_none_or(|radius| rng.random::<f32>() <= 1.0 / radius),
             Predicate::KilledByPlayer => self.by_player,
+            Predicate::RandomChanceWithEnchantedBonus { unenchanted_chance } => {
+                rng.random::<f32>() < *unenchanted_chance
+            }
             Predicate::EntityProperties { entity, predicate } => {
                 self.entity_matches(entity, predicate)
             }
@@ -427,7 +445,8 @@ impl Context<'_> {
                 flags.iter().all(|(flag, value)| {
                     let actual = match flag.as_str() {
                         "is_baby" => facts.baby,
-                        // Nothing burns, sneaks, sprints, swims or flies here.
+                        "is_on_fire" => facts.on_fire,
+                        // Nothing sneaks, sprints, swims or flies here.
                         _ => false,
                     };
                     value.as_bool() == Some(actual)
@@ -469,9 +488,33 @@ impl Context<'_> {
         })
     }
 
-    fn apply(&self, functions: &OneOrMany<Function>, count: &mut i32, rng: &mut impl Rng) {
+    fn apply(
+        &self,
+        functions: &OneOrMany<Function>,
+        item: &mut i32,
+        count: &mut i32,
+        rng: &mut impl Rng,
+    ) {
         for function in functions.iter() {
             match function {
+                Function::ExplosionDecay => {
+                    if let Some(radius) = self.explosion {
+                        let chance = 1.0 / radius;
+                        *count = (0..*count)
+                            .filter(|_| rng.random::<f32>() <= chance)
+                            .count() as i32;
+                    }
+                }
+                Function::FurnaceSmelt { condition } => {
+                    if self.test(condition.as_ref(), rng)
+                        && let Some(recipe) = self
+                            .data
+                            .recipes
+                            .cook(crate::crafting::Cooker::Furnace, *item)
+                    {
+                        *item = recipe.output.item;
+                    }
+                }
                 Function::SetCount {
                     count: n,
                     add,
@@ -582,13 +625,13 @@ impl Context<'_> {
                     }
                     Candidate::Item(item, modifier) => (item, modifier),
                 };
-                let mut count = 1;
-                self.apply(modifier, &mut count, rng);
-                self.apply(&pool.modifier, &mut count, rng);
-                self.apply(&table.modifier, &mut count, rng);
-                let Some(item) = self.data.item_id(item) else {
+                let Some(mut item) = self.data.item_id(item) else {
                     continue;
                 };
+                let mut count = 1;
+                self.apply(modifier, &mut item, &mut count, rng);
+                self.apply(&pool.modifier, &mut item, &mut count, rng);
+                self.apply(&table.modifier, &mut item, &mut count, rng);
                 let max = self.data.item(item).map_or(64, |i| i.stack.max(1));
                 while count > 0 {
                     let part = count.min(max);
@@ -627,6 +670,7 @@ mod tests {
             block_at: &|_| air,
             entity: None,
             by_player: true,
+            explosion: None,
         };
         let mut rng = StdRng::seed_from_u64(7);
         context
@@ -699,6 +743,7 @@ mod tests {
                 block_at: &|_| air,
                 entity: Some(facts),
                 by_player: true,
+                explosion: None,
             };
             let mut rng = StdRng::seed_from_u64(seed);
             let mut names: Vec<(String, i32)> = context
@@ -734,5 +779,73 @@ mod tests {
                 .iter()
                 .all(|(n, _)| n == "minecraft:mutton")
         );
+        // A burning cow drops its beef cooked.
+        let burning = EntityFacts {
+            on_fire: true,
+            ..EntityFacts::default()
+        };
+        assert!(
+            roll("minecraft:cow", burning, 3)
+                .iter()
+                .any(|(n, _)| n == "minecraft:cooked_beef")
+        );
+    }
+
+    #[test]
+    fn explosions_let_a_share_of_the_drops_survive() {
+        let data = GameData::load().unwrap();
+        let air = data.default_state("minecraft:air").unwrap();
+        let stone = data.default_state("minecraft:stone").unwrap();
+        let survived = |radius: Option<f32>| {
+            let mut rng = StdRng::seed_from_u64(11);
+            (0..1000)
+                .filter(|_| {
+                    let context = Context {
+                        data: &data,
+                        table: block_table(data.block_of(stone).unwrap().1),
+                        state: stone,
+                        pos: BlockPos { x: 0, y: 0, z: 0 },
+                        tool: None,
+                        block_at: &|_| air,
+                        entity: None,
+                        by_player: false,
+                        explosion: radius,
+                    };
+                    !context.drops(&mut rng).is_empty()
+                })
+                .count()
+        };
+        assert_eq!(survived(None), 1000);
+        // A creeper's blast, radius 3: about one in three.
+        let share = survived(Some(3.0));
+        assert!((280..390).contains(&share), "{share}");
+    }
+
+    #[test]
+    fn zombies_rarely_drop_iron() {
+        let data = GameData::load().unwrap();
+        let air = data.default_state("minecraft:air").unwrap();
+        let mut rng = StdRng::seed_from_u64(5);
+        let iron = data.item_id("minecraft:iron_ingot").unwrap();
+        let rare = (0..4000)
+            .filter(|_| {
+                Context {
+                    data: &data,
+                    table: entity_table("minecraft:zombie"),
+                    state: air,
+                    pos: BlockPos { x: 0, y: 0, z: 0 },
+                    tool: None,
+                    block_at: &|_| air,
+                    entity: Some(EntityFacts::default()),
+                    by_player: true,
+                    explosion: None,
+                }
+                .drops(&mut rng)
+                .iter()
+                .any(|s| s.item == iron)
+            })
+            .count();
+        // 2.5 % for one of three: iron, carrot or potato.
+        assert!((10..60).contains(&rare), "{rare}");
     }
 }

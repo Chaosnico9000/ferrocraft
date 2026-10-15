@@ -1,5 +1,6 @@
 //! Container screens (`AbstractContainerMenu`): the player's inventory, chests,
-//! barrels, dispensers, hoppers, the ender chest and the crafting table.
+//! barrels, dispensers, hoppers, the ender chest, the crafting table and
+//! furnaces.
 //! Clicks follow vanilla's `doClick`; afterwards the client gets the true
 //! content of the screen, whatever it predicted.
 
@@ -12,7 +13,7 @@ use ferrocraft_protocol::packets::play::{
 };
 
 use super::{Encoded, Game, Outbound, Player};
-use crate::crafting;
+use crate::crafting::{self, Cooker};
 use crate::data::GameData;
 use crate::inventory;
 use crate::world::World;
@@ -48,6 +49,10 @@ pub struct Menu {
     pub block: Option<usize>,
     /// What [`quick_move`](Game::quick_move) does for this kind of screen.
     kind: Kind,
+    /// A furnace screen: where the furnace is, and the fire and progress
+    /// the client was last told.
+    pub furnace: Option<BlockPos>,
+    pub sent_data: Vec<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +61,8 @@ enum Kind {
     /// `n` container slots, then the player's inventory.
     Container(usize),
     Crafting,
+    /// Ingredient, fuel, result, then the player's inventory.
+    Furnace(Cooker),
 }
 
 /// A drag across slots (`QUICK_CRAFT`) in progress.
@@ -86,6 +93,8 @@ impl Menu {
             at: None,
             block: None,
             kind: Kind::Inventory,
+            furnace: None,
+            sent_data: Vec::new(),
         }
     }
 
@@ -106,6 +115,25 @@ impl Menu {
             at: Some(at),
             block: None,
             kind: Kind::Container(size),
+            furnace: None,
+            sent_data: Vec::new(),
+        }
+    }
+
+    /// `AbstractFurnaceMenu`.
+    pub fn furnace(id: i32, at: BlockPos, cooker: Cooker) -> Self {
+        let mut slots: Vec<Source> = (0..3).map(|i| Source::Container(at, i)).collect();
+        slots.extend(player_slots());
+        Self {
+            id,
+            slots,
+            grid: Vec::new(),
+            containers: vec![at],
+            at: Some(at),
+            block: None,
+            kind: Kind::Furnace(cooker),
+            furnace: Some(at),
+            sent_data: Vec::new(),
         }
     }
 
@@ -121,6 +149,8 @@ impl Menu {
             at: Some(at),
             block: None,
             kind: Kind::Crafting,
+            furnace: None,
+            sent_data: Vec::new(),
         }
     }
 
@@ -128,7 +158,7 @@ impl Menu {
         match self.kind {
             Kind::Inventory => 2,
             Kind::Crafting => 3,
-            Kind::Container(_) => 0,
+            Kind::Container(_) | Kind::Furnace(_) => 0,
         }
     }
 }
@@ -174,10 +204,9 @@ impl View<'_> {
         match self.source(slot) {
             Some(Source::Player(i)) => self.player.inventory.set(i, stack),
             Some(Source::Container(pos, i)) => {
+                let data = self.data;
                 self.world.update_block_entity(pos, |entity| {
-                    if let Some(target) = entity.items.get_mut(i) {
-                        *target = stack;
-                    }
+                    entity.set_item(i, stack, data);
                 });
             }
             Some(Source::Ender(i)) => {
@@ -209,12 +238,26 @@ impl View<'_> {
             Some(Source::Player(6)) => name.ends_with("_chestplate") || name == "minecraft:elytra",
             Some(Source::Player(7)) => name.ends_with("_leggings"),
             Some(Source::Player(8)) => name.ends_with("_boots"),
-            Some(Source::Container(pos, _)) => {
-                !(name.ends_with("shulker_box")
-                    && self
-                        .world
-                        .block_entity(pos)
-                        .is_some_and(|e| e.kind == "minecraft:shulker_box"))
+            Some(Source::Container(pos, i)) => {
+                let Some(entity) = self.world.block_entity(pos) else {
+                    return false;
+                };
+                if entity.furnace.is_some() {
+                    // `FurnaceResultSlot` takes nothing, `FurnaceFuelSlot`
+                    // fuel and one empty bucket.
+                    return match i {
+                        2 => false,
+                        1 => {
+                            self.data.item(stack.item).is_some_and(|i| i.fuel.is_some())
+                                || (name == "minecraft:bucket"
+                                    && entity.items[1]
+                                        .as_ref()
+                                        .is_none_or(|s| s.item != stack.item))
+                        }
+                        _ => true,
+                    };
+                }
+                !(name.ends_with("shulker_box") && entity.kind == "minecraft:shulker_box")
             }
             Some(_) => true,
         }
@@ -415,6 +458,45 @@ impl Game {
 
     fn click(&mut self, entity_id: i32, slot: i16, button: i8, input: i32, mode: GameMode) {
         let mut drops = Vec::new();
+        // `FurnaceResultSlot.onTake` pays out the experience.
+        let furnace = self
+            .players
+            .get(&entity_id)
+            .and_then(|p| p.menu.as_ref())
+            .and_then(|m| m.furnace);
+        let result_before = furnace.and_then(|pos| {
+            self.context
+                .world
+                .block_entity(pos)
+                .map(|e| e.items[2].as_ref().map_or(0, |s| s.count))
+        });
+        self.click_slots(entity_id, slot, button, input, mode, &mut drops);
+        if let (Some(pos), Some(before)) = (furnace, result_before) {
+            let after = self
+                .context
+                .world
+                .block_entity(pos)
+                .map_or(0, |e| e.items[2].as_ref().map_or(0, |s| s.count));
+            if after < before
+                && let Some(at) = self.players.get(&entity_id).map(|p| p.pos)
+            {
+                self.furnace_experience(pos, at);
+            }
+        }
+        for stack in drops {
+            self.drop_from(entity_id, stack);
+        }
+    }
+
+    fn click_slots(
+        &mut self,
+        entity_id: i32,
+        slot: i16,
+        button: i8,
+        input: i32,
+        mode: GameMode,
+        drops: &mut Vec<ItemStack>,
+    ) {
         {
             let Some(mut s) = self.view(entity_id) else {
                 return;
@@ -494,9 +576,6 @@ impl Game {
                 }
                 _ => {}
             }
-        }
-        for stack in drops {
-            self.drop_from(entity_id, stack);
         }
     }
 
@@ -964,6 +1043,16 @@ fn quick_move(s: &mut View, index: usize) -> Option<ItemStack> {
                 range(0, size, false)
             }
         }
+        // `AbstractFurnaceMenu.quickMoveStack`: what cooks goes in on top,
+        // fuel below, the rest between inventory and hotbar.
+        Kind::Furnace(cooker) => match index {
+            2 => range(3, 39, true),
+            0 | 1 => range(3, 39, false),
+            _ if s.data.recipes.cook(cooker, stack.item).is_some() => range(0, 1, false),
+            _ if s.data.item(stack.item).is_some_and(|i| i.fuel.is_some()) => range(1, 2, false),
+            3..=29 => range(30, 39, false),
+            _ => range(3, 30, false),
+        },
     };
     if s.source(index) == Some(Source::Result) {
         // Only when the whole result fits.

@@ -92,18 +92,31 @@ impl Server {
         let data = Arc::new(GameData::load().expect("embedded game data"));
         let world =
             Arc::new(World::superflat(Arc::clone(&data)).expect("building the superflat world"));
+        let mut entities = game::StoredEntities::default();
         let storage = if config.world.is_empty() {
             None
         } else {
             let storage = Storage::open(Path::new(&config.world))?;
             let chunks = storage.load_chunks(&data)?;
-            info!(world = %config.world, chunks = chunks.len(), "loaded the world");
+            entities = game::StoredEntities::load(&storage)?;
+            info!(
+                world = %config.world,
+                chunks = chunks.len(),
+                entities = entities.len(),
+                "loaded the world"
+            );
             for chunk in chunks {
                 world.load_chunk(chunk);
             }
             world.light_loaded();
             Some(Arc::new(storage))
         };
+        let difficulty = game::parse_difficulty(&config.difficulty).with_context(|| {
+            format!(
+                "difficulty = \"{}\" is not peaceful, easy, normal or hard",
+                config.difficulty
+            )
+        })?;
         let default_game_mode = game::parse_mode(&config.game_mode)
             .with_context(|| format!("game_mode = \"{}\" is not a game mode", config.game_mode))?;
         let spawn = BlockPos {
@@ -133,6 +146,9 @@ impl Server {
             level: level.clone(),
             entity_ids: Arc::clone(&next_entity_id),
             animals: config.animals,
+            monsters: config.monsters,
+            difficulty,
+            entities,
         });
         Ok(Arc::new(Self {
             config,

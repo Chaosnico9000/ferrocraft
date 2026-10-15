@@ -9,17 +9,24 @@
 
 mod combat;
 mod command;
+mod explosion;
+mod furnace;
 mod interact;
 mod item;
 mod menu;
 mod mob;
+mod orb;
+mod path;
 mod physics;
 mod player;
+mod projectile;
 mod survival;
 mod tracker;
 
-pub use command::{OPERATOR, parse_mode, tree as command_tree};
+pub use command::{OPERATOR, parse_difficulty, parse_mode, tree as command_tree};
 use menu::{Drag, Menu};
+pub use mob::StoredEntities;
+pub use player::Experience;
 use player::{ENDER_SLOTS, Food, PLAYER_UPDATE_INTERVAL};
 pub use player::{Player, abilities};
 use tracker::Tracker;
@@ -30,13 +37,15 @@ use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
+use ferrocraft_protocol::Nbt;
 use ferrocraft_protocol::codec::BlockPos;
 use ferrocraft_protocol::packets::Packet;
 use ferrocraft_protocol::packets::login::GameProfile;
 use ferrocraft_protocol::packets::play::{
-    ClockState, ContainerClick, EntityData, EntityDataValue, EntityDataValues, GameMode, ItemStack,
-    LightUpdate, PlayerAction, PlayerInfoEntry, PlayerInfoLatency, SetEntityData, SetEquipment,
-    SetTime, SignUpdate, SwingAnimation, SystemChat, UseItemOn, data_index, text,
+    ChangeDifficulty, ClockState, ContainerClick, EntityData, EntityDataValue, EntityDataValues,
+    GameMode, ItemStack, LightUpdate, PlayerAction, PlayerInfoEntry, PlayerInfoLatency,
+    SetEntityData, SetEquipment, SetTime, SignUpdate, SwingAnimation, SystemChat, UseItemOn,
+    data_index, text,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
@@ -46,7 +55,7 @@ use crate::data::GameData;
 use crate::inventory::Inventory;
 use crate::level::Level;
 use crate::storage::Storage;
-use crate::world::{BIOME, LAYERS, World};
+use crate::world::{BIOME, ChunkPos, LAYERS, World};
 
 pub const TICK: Duration = Duration::from_millis(50);
 /// Vanilla warns when it falls this far behind and then skips the missed ticks.
@@ -182,6 +191,7 @@ pub struct Joined {
     pub inventory: Inventory,
     pub ender: Vec<(usize, ItemStack)>,
     pub health: f32,
+    pub experience: Experience,
     pub skin_parts: u8,
     pub main_hand: i32,
     pub outbound: UnboundedSender<Outbound>,
@@ -316,8 +326,13 @@ pub struct Context {
     pub level: Level,
     /// Hands out entity ids, shared with the connections.
     pub entity_ids: Arc<AtomicI32>,
-    /// Whether animals spawn by themselves.
+    /// Whether animals and monsters spawn by themselves.
     pub animals: bool,
+    pub monsters: bool,
+    /// 0 peaceful, 1 easy, 2 normal, 3 hard.
+    pub difficulty: u8,
+    /// Entities saved in the world, to come back near players.
+    pub entities: StoredEntities,
 }
 
 /// Starts the tick thread. It runs until every [`Sender`] is dropped, i.e.
@@ -344,6 +359,17 @@ struct Game {
     item_type: i32,
     items: HashMap<i32, item::ItemEntity>,
     mobs: HashMap<i32, mob::Mob>,
+    arrows: HashMap<i32, projectile::Arrow>,
+    orbs: HashMap<i32, orb::Orb>,
+    /// Entities of chunks no player is near, and those Ferrocraft cannot
+    /// run, kept for saving.
+    stored: StoredEntities,
+    foreign: HashMap<ChunkPos, Vec<Nbt>>,
+    /// Players an explosion threw this tick, and how far.
+    explosion_knockback: Vec<(i32, [f64; 3])>,
+    /// `Level.skyDarken` and `monsters_burn` at the time of day.
+    sky_darken: i32,
+    monsters_burn: bool,
     /// Block changes due later, like a button popping back out.
     scheduled: Vec<Scheduled>,
     /// How many players look into each open container.
@@ -361,7 +387,7 @@ struct Scheduled {
 }
 
 impl Game {
-    fn new(context: Context) -> Self {
+    fn new(mut context: Context) -> Self {
         let air = context
             .data
             .default_state("minecraft:air")
@@ -385,6 +411,13 @@ impl Game {
                 .expect("vanilla entity types"),
             items: HashMap::new(),
             mobs: HashMap::new(),
+            arrows: HashMap::new(),
+            orbs: HashMap::new(),
+            stored: std::mem::take(&mut context.entities),
+            foreign: HashMap::new(),
+            explosion_knockback: Vec::new(),
+            sky_darken: 0,
+            monsters_burn: false,
             scheduled: Vec::new(),
             openers: HashMap::new(),
             context,
@@ -420,6 +453,9 @@ impl Game {
             self.tick_scheduled();
             self.tick_items();
             self.tick_mobs();
+            self.tick_arrows();
+            self.tick_orbs();
+            self.tick_furnaces();
             self.send_light_updates();
             self.sync_entities();
             self.advance_time();
@@ -445,6 +481,10 @@ impl Game {
                     tick = self.tick,
                     mspt = stats.mspt(),
                     players = self.players.len(),
+                    monsters = self.mobs.values().filter(|m| m.kind.hostile()).count(),
+                    animals = self.mobs.values().filter(|m| !m.kind.hostile()).count(),
+                    items = self.items.len(),
+                    stored = self.stored.len(),
                     "tick stats"
                 );
             }
@@ -700,6 +740,9 @@ impl Game {
             dead: joined.health <= 0.0,
             using: None,
             last_swing: 0,
+            experience: joined.experience,
+            xp_delay: 0,
+            last_level_up: 0,
         };
 
         // The newcomer learns about everyone, everyone about the newcomer.
@@ -717,6 +760,9 @@ impl Game {
         for mob in self.mobs.values_mut().filter(|m| m.alive()) {
             player.send(Outbound::EntityAdded(mob.state()));
         }
+        for state in self.projectile_states() {
+            player.send(Outbound::EntityAdded(state));
+        }
         let added = Outbound::PlayerAdded {
             info: Box::new(player.info.clone()),
             state: player.state(player_type),
@@ -727,6 +773,8 @@ impl Game {
         let entity_id = player.entity_id;
         self.players.insert(entity_id, player);
         self.send_health(entity_id);
+        self.send_experience(entity_id);
+        self.send_difficulty(Some(entity_id));
         if self.players.get(&entity_id).is_some_and(|p| p.dead) {
             // Saved dead: straight to the death screen.
             self.die(
@@ -864,18 +912,21 @@ impl Game {
         }
     }
 
-    /// Vanilla's autosave: every player and the changed chunks.
-    fn save_all(&self) {
-        let Some(storage) = &self.context.storage else {
+    /// Vanilla's autosave: every player, the changed chunks and the
+    /// entities.
+    fn save_all(&mut self) {
+        let Some(storage) = self.context.storage.clone() else {
             return;
         };
+        self.save_entities(&storage);
         for player in self.players.values() {
             self.save_player(player);
         }
-        if let Err(err) = self.context.level.save(storage, LAYERS, BIOME) {
+        let difficulty = command::DIFFICULTIES[usize::from(self.context.difficulty.min(3))];
+        if let Err(err) = self.context.level.save(&storage, LAYERS, BIOME, difficulty) {
             warn!("saving level.dat failed: {err:#}");
         }
-        match self.context.world.save(storage, &self.context.data) {
+        match self.context.world.save(&storage, &self.context.data) {
             Ok(0) => {}
             Ok(chunks) => debug!(chunks, "saved the world"),
             Err(err) => warn!("saving the world failed: {err:#}"),
@@ -944,6 +995,10 @@ impl Game {
         let level = &mut self.context.level;
         level.game_time += 1;
         level.day_time += 1;
+        let time = level.day_time.rem_euclid(24000);
+        self.sky_darken = sky_darken(time);
+        self.monsters_burn = monsters_burn(time);
+        let level = &self.context.level;
         if level.game_time % 20 == 0 && !self.players.is_empty() {
             let packet = SetTime {
                 game_time: level.game_time,
@@ -1035,6 +1090,29 @@ impl Game {
         );
     }
 
+    /// The difficulty, to one player or everyone.
+    fn send_difficulty(&self, to: Option<i32>) {
+        let packet = Outbound::Packet(Arc::new(Encoded::new(&ChangeDifficulty {
+            difficulty: i32::from(self.context.difficulty),
+            locked: false,
+        })));
+        match to {
+            Some(id) => {
+                if let Some(player) = self.players.get(&id) {
+                    player.send(packet);
+                }
+            }
+            None => self.broadcast(None, &packet),
+        }
+    }
+
+    /// Everything thrown or dropped that a new player should see besides
+    /// items and mobs: arrows and experience orbs.
+    fn projectile_states(&mut self) -> Vec<Arc<EntityState>> {
+        let arrows = self.arrow_states();
+        arrows.into_iter().chain(self.orb_states()).collect()
+    }
+
     /// Vanilla's rule (`ServerCommonPacketListenerImpl.keepConnectionAlive`):
     /// send a keep-alive every interval; if the last one is still unanswered
     /// after another interval, the player timed out.
@@ -1053,5 +1131,59 @@ impl Game {
             player.last_keep_alive = now;
             player.send(Outbound::KeepAlive(id));
         }
+    }
+}
+
+/// A track of `timeline/day.json`: keyframes `(tick, value)` over a day,
+/// looping, linearly between them (`KeyframeTrackSampler`).
+fn sample(keyframes: &[(i64, f32)], time: i64) -> f32 {
+    let period = 24000;
+    let (first, last) = (keyframes[0], keyframes[keyframes.len() - 1]);
+    let mut segments = vec![((last.0 - period, last.1), first)];
+    segments.extend(keyframes.windows(2).map(|w| (w[0], w[1])));
+    segments.push((last, (first.0 + period, first.1)));
+    let ((from, a), (to, b)) = segments
+        .iter()
+        .copied()
+        .find(|&(_, (to, _))| time < to)
+        .unwrap_or(segments[segments.len() - 1]);
+    if time <= from {
+        a
+    } else if time >= to {
+        b
+    } else {
+        a + (b - a) * ((time - from) as f32 / (to - from) as f32)
+    }
+}
+
+/// `Level.updateSkyBrightness`: 15 less the sky light level, which
+/// `gameplay/sky_light_level` scales from full by day to 4 at night.
+fn sky_darken(time: i64) -> i32 {
+    const SKY_LIGHT: [(i64, f32); 4] = [
+        (133, 1.0),
+        (11867, 1.0),
+        (13670, 0.266_666_68),
+        (22330, 0.266_666_68),
+    ];
+    (15.0 - 15.0 * sample(&SKY_LIGHT, time)) as i32
+}
+
+/// `gameplay/monsters_burn`: from just before sunrise until dusk.
+fn monsters_burn(time: i64) -> bool {
+    !(12542..23460).contains(&time)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn day_and_night_like_the_timeline() {
+        assert_eq!(sky_darken(6000), 0, "noon");
+        assert_eq!(sky_darken(18000), 11, "midnight");
+        assert_eq!(sky_darken(0), 0, "just before the day starts");
+        assert!((1..11).contains(&sky_darken(12800)), "dusk");
+        assert!(monsters_burn(1000) && monsters_burn(23500));
+        assert!(!monsters_burn(13000) && !monsters_burn(18000));
     }
 }

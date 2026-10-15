@@ -8,8 +8,8 @@ use ferrocraft_protocol::Nbt;
 use ferrocraft_protocol::codec::{BlockPos, Decode, Encode, VarInt};
 use ferrocraft_protocol::packets::play::{
     BlockDestruction, ClientboundContainerClose, DamageEvent, EntityEvent, GameMode, ItemStack,
-    LEVEL_EVENT_DESTROY_BLOCK, LevelEvent, PlayerCombatKill, SetHealth, SetHeldSlot, SystemChat,
-    equipment_slot, text,
+    LEVEL_EVENT_DESTROY_BLOCK, LevelEvent, LpVec3, PlayerCombatKill, SetEntityMotion, SetHealth,
+    SetHeldSlot, SystemChat, equipment_slot, text,
 };
 use tracing::info;
 
@@ -43,6 +43,22 @@ fn use_remainder(item: &str) -> Option<&'static str> {
 /// Modes in which the player has a body that can starve, fall and die.
 fn mortal(mode: GameMode) -> bool {
     matches!(mode, GameMode::Survival | GameMode::Adventure)
+}
+
+/// The armor slots of the inventory menu: head, chest, legs, feet.
+const ARMOR_SLOTS: [usize; 4] = [5, 6, 7, 8];
+
+/// Damage to a player and where it came from.
+pub(super) struct Hit<'a> {
+    pub amount: f32,
+    /// `minecraft:damage_type`.
+    pub damage_type: &'a str,
+    /// Who is to blame, and what hit (the arrow, or the same mob).
+    pub attacker: Option<i32>,
+    pub direct: Option<i32>,
+    /// Knocked back away from here (`LivingEntity.knockback(0.4)`).
+    pub knockback_from: Option<[f64; 3]>,
+    pub message: Nbt,
 }
 
 impl Game {
@@ -276,6 +292,7 @@ impl Game {
                     block_at: &|p| world.block(p),
                     entity: None,
                     by_player: true,
+                    explosion: None,
                 };
                 drops.extend(context.drops(&mut rng).into_iter().map(|d| (at, d)));
             }
@@ -495,8 +512,7 @@ impl Game {
         }
     }
 
-    /// `LivingEntity.hurtServer` for players: health goes down, the client
-    /// flinches, everyone sees it; at zero the player dies.
+    /// Damage without an attacker, such as a fall.
     pub(super) fn hurt(
         &mut self,
         entity_id: i32,
@@ -504,18 +520,78 @@ impl Game {
         damage_type: &str,
         death_message: Nbt,
     ) {
-        let source_type = self
-            .context
-            .data
-            .registry_id("minecraft:damage_type", damage_type)
+        self.hurt_player(
+            entity_id,
+            Hit {
+                amount,
+                damage_type,
+                attacker: None,
+                direct: None,
+                knockback_from: None,
+                message: death_message,
+            },
+        );
+    }
+
+    /// `Player.hurtServer` and `LivingEntity.hurtServer` for players: the
+    /// difficulty scales what mobs and explosions do, armor takes its part
+    /// and wears, health goes down, the client flinches and is knocked
+    /// back, everyone sees it; at zero the player dies. Returns whether it
+    /// hurt.
+    pub(super) fn hurt_player(&mut self, entity_id: i32, hit: Hit) -> bool {
+        let data = Arc::clone(&self.context.data);
+        let source_type = data
+            .registry_id("minecraft:damage_type", hit.damage_type)
             .unwrap_or(0);
-        let bypasses = damage_type == "minecraft:generic_kill";
-        let Some(player) = self.players.get_mut(&entity_id) else {
-            return;
+        let bypasses = hit.damage_type == "minecraft:generic_kill";
+        let armored = !data.tag_contains(
+            "minecraft:damage_type",
+            "minecraft:bypasses_armor",
+            source_type,
+        );
+        // `DamageScaling`: explosions always, the rest when a mob is to
+        // blame.
+        let by_mob = hit.attacker.is_some_and(|a| !self.players.contains_key(&a));
+        let scales = hit.damage_type == "minecraft:explosion" || by_mob;
+        let difficulty = self.context.difficulty;
+        let Some(player) = self.players.get(&entity_id) else {
+            return false;
         };
         if player.dead || (!bypasses && (!mortal(player.game_mode()) || player.invulnerable > 0)) {
-            return;
+            return false;
         }
+        let mut amount = hit.amount;
+        if scales {
+            amount = match difficulty {
+                0 => 0.0,
+                1 => (amount / 2.0 + 1.0).min(amount),
+                3 => amount * 3.0 / 2.0,
+                _ => amount,
+            };
+        }
+        if amount <= 0.0 {
+            return false;
+        }
+        let mut wear: Vec<(usize, i32)> = Vec::new();
+        if armored {
+            // `LivingEntity.hurtArmor`: a point per four of the damage on
+            // each piece, then `CombatRules.getDamageAfterAbsorb`.
+            let points = (amount / 4.0).max(1.0) as i32;
+            let (mut armor, mut toughness) = (0.0, 0.0);
+            for slot in ARMOR_SLOTS {
+                if let Some(item) = player.inventory.get(slot).and_then(|s| data.item(s.item)) {
+                    armor += item.armor;
+                    toughness += item.armor_toughness;
+                    if item.armor > 0.0 {
+                        wear.push((slot, points));
+                    }
+                }
+            }
+            amount = super::mob::after_armor(amount, armor, toughness);
+        }
+        let Some(player) = self.players.get_mut(&entity_id) else {
+            return false;
+        };
         player.health = (player.health - amount).max(0.0);
         player.invulnerable = HURT_COOLDOWN;
         player.data_dirty = true;
@@ -523,17 +599,38 @@ impl Game {
         let packet = Encoded::new(&DamageEvent {
             entity_id,
             source_type,
-            cause: None,
-            direct: None,
+            cause: hit.attacker,
+            direct: hit.direct.or(hit.attacker),
             source_pos: None,
         });
         player.send(Outbound::Packet(Arc::new(packet.clone())));
+        if let Some(at) = hit.knockback_from {
+            // The client moves itself, so it is told directly.
+            let (dx, dz) = (at[0] - player.pos[0], at[2] - player.pos[2]);
+            let length = dx.hypot(dz).max(1.0e-4);
+            player.send(Outbound::Packet(Arc::new(Encoded::new(&SetEntityMotion {
+                entity_id,
+                velocity: LpVec3([-dx / length * 0.4, 0.4, -dz / length * 0.4]),
+            }))));
+        }
         let dead = player.health <= 0.0;
         self.broadcast_entity(entity_id, vec![packet]);
+        // `DamageType.exhaustion`, 0.1 for blows, nothing for falls and
+        // hunger.
+        if !matches!(
+            hit.damage_type,
+            "minecraft:fall" | "minecraft:starve" | "minecraft:on_fire" | "minecraft:generic"
+        ) {
+            self.exhaust(entity_id, 0.1);
+        }
+        for (slot, points) in wear {
+            self.wear(entity_id, slot, points);
+        }
         self.send_health(entity_id);
         if dead {
-            self.die(entity_id, death_message);
+            self.die(entity_id, hit.message);
         }
+        true
     }
 
     /// `ServerPlayer.die`: the death screen, a message for everyone, the
@@ -592,6 +689,19 @@ impl Game {
             self.scatter_from(entity_id, stack);
         }
         self.send_menu(entity_id);
+        // `Player.getBaseExperienceReward`: seven points a level, at most a
+        // hundred; the rest is lost.
+        if let Some(player) = self.players.get_mut(&entity_id) {
+            let dropped = (player.experience.level * 7).min(100);
+            let at = player.pos;
+            player.experience = super::Experience {
+                score: player.experience.score,
+                ..Default::default()
+            };
+            if dropped > 0 && player.game_mode() != GameMode::Spectator {
+                self.award_experience(at, dropped);
+            }
+        }
     }
 
     /// The respawn button: back to the world spawn with full health.
@@ -628,6 +738,7 @@ impl Game {
         let state = player.state(player_type);
         self.broadcast(Some(entity_id), &Outbound::Respawned(state));
         self.send_health(entity_id);
+        self.send_experience(entity_id);
         self.send_menu(entity_id);
         if let Some(player) = self.players.get(&entity_id) {
             let slot = player.inventory.selected() as i32;
@@ -753,11 +864,32 @@ impl Game {
     }
 
     /// `FoodData.tick`: exhaustion eats saturation, then food; a full
-    /// stomach heals, an empty one hurts (difficulty normal).
+    /// stomach heals, an empty one hurts: on easy down to half the hearts,
+    /// on normal to half a heart, on hard to death. In peaceful hunger and
+    /// wounds heal by themselves (`Player.aiStep`).
     fn tick_food(&mut self, entity_id: i32) {
+        let difficulty = self.context.difficulty;
+        let tick = self.tick;
         let Some(player) = self.players.get_mut(&entity_id) else {
             return;
         };
+        if difficulty == 0 && mortal(player.game_mode()) {
+            let mut changed = false;
+            if player.health < MAX_HEALTH && tick.is_multiple_of(20) {
+                player.health = (player.health + 1.0).min(MAX_HEALTH);
+                player.data_dirty = true;
+                player.state = None;
+                changed = true;
+            }
+            if player.food.level < 20 && tick.is_multiple_of(10) {
+                player.food.level += 1;
+                changed = true;
+            }
+            if changed {
+                self.send_health(entity_id);
+            }
+            return;
+        }
         let before = player.food;
         let food = &mut player.food;
         if food.exhaustion > 4.0 {
@@ -789,7 +921,11 @@ impl Game {
         } else if food.level <= 0 {
             food.timer += 1;
             if food.timer >= 80 {
-                starve = player.health > 1.0;
+                starve = match difficulty {
+                    1 => player.health > 10.0,
+                    2 => player.health > 1.0,
+                    _ => true,
+                };
                 food.timer = 0;
             }
         } else {

@@ -124,3 +124,31 @@ Minecraft-Server (Java Edition 26.3) in Rust. Was er kann und der Aufbau stehen 
   `rename` kann nach einem harten Neustart (WSL!) eine leere Datei unter dem
   richtigen Namen liegen. `write_atomically` synchronisiert und behält
   `…_old`.
+- **Entities liegen getrennt von den Chunks**: in
+  `dimensions/minecraft/overworld/entities/r.X.Z.mca`, je Chunk
+  `{DataVersion, Position: [I; x, z], Entities: [...]}` (`EntityStorage`).
+  Vanilla speichert dort auch Entities, die Ferrocraft nicht kennt; sie
+  müssen beim Speichern erhalten bleiben.
+- **Vanilla speichert halbfertige Chunks**: um den erkundeten Bereich liegen
+  viele Chunks mit `Status` wie `minecraft:structure_starts`, ohne Blöcke. Nur
+  `minecraft:full` ist ein fertiger Chunk.
+- **Brennstoffe sind Daten, kein Code**: die Item-Komponente `cooking_fuel`
+  verweist auf `context_int_provider/cooking/*` (Brennzeit) und
+  `context_float_provider/cooking/*` (Tempo); die Bedingung
+  `block/fast_cooking` macht Räucher- und Hochöfen doppelt so schnell und
+  halbiert die Brennzeit. `gen-data` rechnet beides aus.
+- **Tageslicht kommt aus `timeline/day.json`**: `gameplay/sky_light_level`
+  (15 mal Faktor, nachts 4) und `gameplay/monsters_burn`; `skyDarken` ist
+  `(int)(15 - Wert)`. Monster spawnen bei Himmelslicht über `random(32)` nie.
+- **Entity-Daten der Monster**: `Mob` 15 (0x04 Arme hoch), Zombie 16 (Baby),
+  Creeper 16 (Zündrichtung, Int) und 18 (gezündet), Spinne 16 (klettert),
+  Pfeil 10 (steckt), Erfahrungskugel 8 (Wert). Das Extra-Int von
+  `add_entity` ist beim Pfeil der Schütze.
+- **`explode`** trägt Partikel als Registry-ID ohne Optionen, den Sound als
+  `id + 1` und eine gewichtete Liste von Block-Partikeln; den Rückstoß bekommt
+  nur der Spieler, den es betrifft.
+- **Schaden skaliert nur manchmal mit dem Schwierigkeitsgrad**: Explosionen
+  immer, sonst nur, wenn ein Mob schuld ist (`scaling` der `damage_type`s).
+- **Tests mit mehreren Entities** dürfen sich nicht auf die Reihenfolge der
+  `add_entity` verlassen, und Werte, die im selben Tick kommen
+  (`container_set_data`), kommen in Index-Reihenfolge.

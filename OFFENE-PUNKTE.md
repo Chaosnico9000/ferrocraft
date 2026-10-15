@@ -5,15 +5,21 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
 
 ## Spielwelt
 
-- Feindliche Mobs (Zombies, Skelette, Creeper, Spinnen) und weitere Tiere
-- Tiere: speichern (sie verschwinden noch beim Neustart und weit weg von allen
-  Spielern), Babys und Züchten, echte Wegfindung um Hindernisse, Gras fressen
-  und Wolle nachwachsen lassen, Leinen, Reiten
-- Erfahrungskugeln beim Töten
-- Öfen, Räucher- und Schmelzöfen, Braustände (eigene Menüs mit Fortschritt)
+- Weitere Mobs: Endermen, Hexen, Schleime, Zombiedorfbewohner, Pferde,
+  Dorfbewohner (ihre Spawn-Anteile sind schon eingeplant, es spawnt nur nichts)
+- Tiere: Babys und Züchten, Gras fressen und Wolle nachwachsen lassen, Leinen,
+  Reiten, Varianten (warme und kalte Kühe, Schweine, Hühner)
+- Monster: Zombies brechen keine Türen auf und rufen keine Verstärkung, Skelette
+  suchen keinen Schatten und laufen beim Schießen nicht seitwärts, keine
+  Spinnenreiter, Mobs greifen sich nicht gegenseitig an, keine Rüstung und
+  Waffen beim Spawnen
+- Mobs schwimmen nicht (sie meiden Wasser nur), Leitern nutzen nur Spinnen
+- Braustände (eigenes Menü mit Fortschritt), Trichter und Öfen arbeiten nicht
+  zusammen
 - Redstone: Strom, Kolben, Beobachter, Verstärker, Komparatoren
 - Wasser und Lava fließen, Schwerkraft für Sand und Kies
-- Explosionen (TNT, Creeper)
+- TNT zünden (Explosionen gibt es, aber nur von Creepern); Feuer, das sich
+  ausbreitet
 - Wachsen: Pflanzen, Bäume, Gras und Blätter, die zerfallen
 - Wetter: Regen, Gewitter
 - Nether und Ende, Portale
@@ -23,11 +29,12 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
 
 - Verzauberungen, Amboss, Schleifstein; dadurch auch Behutsamkeit und Glück
   beim Abbauen
-- Rüstung schützt (Rüstungswerte, Verzauberungen)
-- Erfahrung: Kugeln, Level
-- Schaden durch Feuer, Lava, Ertrinken, Kakteen; Schild, Bogen, Dreizack
+- Verzauberungen auf Rüstung; Spieler brennen nicht
+- Erfahrung aus Erzen und vom Züchten, Reparieren mit Erfahrung
+- Schaden durch Feuer, Lava, Ertrinken, Kakteen; Schild, Bogen und Armbrust
+  für Spieler (Pfeile gibt es schon, nur Skelette schießen), Dreizack
 - Statuseffekte, Tränke
-- Schwierigkeitsgrade und Spielregeln (`gamerule`)
+- Spielregeln (`gamerule`), etwa `mobGriefing` oder `keepInventory`
 
 ## Lücken im Vorhandenen
 
@@ -39,7 +46,11 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
   Verzauberungen, Inhalt)
 - Komponenten werden in Spielerdateien in Netzwerkform gespeichert, nicht wie
   bei Vanilla als NBT
-- Weitere Befehle: `/setblock`, `/fill`, `/summon`, `/effect`, `/weather`, …
+- Weitere Befehle: `/setblock`, `/fill`, `/effect`, `/weather`, `/data`, …;
+  `/summon` ohne NBT, Ziele nur `@s`, `@a`, `@p`, `@r` und Namen
+- Keine Server-Konsole; Befehle gehen nur über einen Spieler (oder den Bot
+  mit `--commands`)
+- Pfeile werden nicht gespeichert, stecken nicht sichtbar in Spielern
 - Bewegungen werden nicht geprüft (Fliegen, Durch-Wände-Laufen im
   Überlebensmodus)
 
@@ -48,11 +59,14 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
 Die Tests laufen mit dem eigenen Test-Client und gegen Vanilla-Dateien; ein
 echter Minecraft-Client ließ sich in der Entwicklungsumgebung nicht starten.
 
-- Login im Online-Modus mit dem 2048-Bit-Schlüssel
 - Respawn-Bildschirm und Rückkehr in die Welt
 - Geräusche von Kisten, Türen, Knöpfen und Hebeln
 - Essen (Animation, Ende nach 1,6 s)
 - Tiere: Laufen, Kopfdrehen und Geräusche, wie sie im Client aussehen
+- Monster: erhobene Arme der Zombies, Bogenspannen der Skelette, Anschwellen
+  und Explosion der Creeper, klettern der Spinnen; Feuer auf brennenden
+  Zombies; Pfeile im Flug
+- Ofenmenü: Flamme und Pfeil laufen mit, Erfahrungskugeln fliegen zum Spieler
 
 ## Nach Fertigstellung: Mod-Schicht für Fabric und Forge
 
