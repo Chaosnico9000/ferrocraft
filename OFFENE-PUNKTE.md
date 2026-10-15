@@ -14,20 +14,26 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
   Spinnenreiter, Mobs greifen sich nicht gegenseitig an, keine Rüstung und
   Waffen beim Spawnen
 - Mobs schwimmen nicht (sie meiden Wasser nur), Leitern nutzen nur Spinnen;
-  Strömung schiebt weder Mobs noch Items, Items treiben nicht auf; Lava setzt
-  nichts in Brand und schadet nicht
-- Braustände (eigenes Menü mit Fortschritt), Trichter und Öfen arbeiten nicht
-  zusammen
-- Redstone: Kolben, Beobachter, Komparatoren, Spender und Werfer,
-  Tageslichtsensoren, Zielblöcke, Stolperdrähte, Schienen; Notenblöcke
-- TNT durch Feuer oder brennende Pfeile zünden; Feuer, das sich ausbreitet;
-  Feuer mit dem Feuerzeug legen
+  Strömung schiebt weder Mobs noch Items, Items treiben nicht auf
+- Braustände (eigenes Menü mit Fortschritt); Trichter lassen Braustände
+  und Komposter aus, Trichterloren fehlen
+- Redstone: Tageslichtsensoren, Zielblöcke, Stolperdrähte, Schienen,
+  Notenblöcke, Kupferbirnen schalten, Crafter; Komparatoren lesen keine
+  Rahmen, Jukeboxen, Lesepulte, Bienenstöcke und Bücherregale (geben 0)
+- Spender: Feuerkugeln, Schneebälle, Eier, Tränke und Raketen fliegen nicht
+  (sie fallen als Item heraus), keine Rüstung anlegen, Scheren, Boote,
+  Loren, Kürbisse, Glasflaschen; Kolben schieben Spieler nur auf deren
+  Client (Server-seitig Mobs, Items, TNT), Schleim lässt nichts springen
+- Pfeile mit der Verzauberung Flamme (es gibt noch keine Verzauberungen);
+  Blitzableiter, Skelettpferde-Fallen, verwandelte Schweine und
+  Dorfbewohner bei Blitzschlag
 - Wachsen: Riesenbäume aus vier Setzlingen (Fichte, Tropenbaum), Mangroven,
   Azaleen, Bienennester an Bäumen; Bambus, Ranken, Kelp, Seetang,
   Pilze, Beerensträucher, Kakao; Doppelpflanzen ohne Boden fallen nicht ab
 - Wasser: Fischeimer setzen keine Fische aus, Blasensäulen, Eis schmilzt
   nicht, Schnee fällt nicht
-- Wetter: Regen (bewässert Ackerboden), Gewitter
+- Wetter: Schnee und Eis in kalten Biomen (Ferrocraft kennt nur die
+  Ebene); Schlafen überspringt die Nacht und das Gewitter nicht
 - Nether und Ende, Portale
 - Andere Weltgeneratoren als Superflat
 
@@ -37,12 +43,15 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
   beim Abbauen
 - Verzauberungen auf Rüstung; Spieler brennen nicht
 - Erfahrung aus Erzen und vom Züchten, Reparieren mit Erfahrung
-- Schaden durch Feuer, Lava, Ertrinken, Kakteen; Schild, Armbrust, Dreizack;
+- Ersticken in Blöcken, Erfrieren im Pulverschnee, Beerensträucher;
+  Schild, Armbrust, Dreizack;
   Spektral- und Trankpfeile wirken wie normale
 - Statuseffekte, Tränke
-- Weitere Spielregeln: `/gamerule` kennt erst `random_tick_speed` und die
-  beiden Quellwasser-Regeln, und sie werden noch nicht in `level.dat`
-  gespeichert; `mob_griefing`, `keep_inventory` u. a. fehlen
+- Spielregeln, denen Ferrocraft noch nicht folgt (sie werden gesetzt und
+  gespeichert): `keep_inventory`, `natural_health_regeneration`,
+  `show_death_messages`, `spawn_mobs`/`spawn_monsters` (Ferrocraft nimmt
+  dafür `animals`/`monsters` aus der Konfiguration), `tnt_explodes`, `pvp`,
+  `block_drops`, `mob_drops`, `immediate_respawn` u. a.
 
 ## Lücken im Vorhandenen
 
@@ -56,14 +65,14 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
   bei Vanilla als NBT
 - Weitere Befehle: `/effect`, `/weather`, `/data`, `/clone`, …;
   `/summon` ohne NBT, Ziele nur `@s`, `@a`, `@p`, `@r` und Namen
-- Keine Server-Konsole; Befehle gehen nur über einen Spieler (oder den Bot
-  mit `--commands`)
-- Pfeile, gezündetes TNT und fallende Blöcke werden nicht gespeichert
-  (fallende Blöcke landen meist, bevor gespeichert wird), Pfeile stecken nicht
-  sichtbar in Spielern; Spielerbewegung geht nicht in den Schwung der Pfeile
-  ein
-- Bewegungen werden nicht geprüft (Fliegen, Durch-Wände-Laufen im
-  Überlebensmodus)
+- Die Konsole meldet Befehle von Operatoren nicht wie Vanilla an andere
+  Operatoren weiter (`log_admin_commands`); kein `op`/`deop`, `whitelist`,
+  `ban` (Operatoren stehen in der Konfiguration)
+- Pfeile stecken nicht sichtbar in Spielern; Spielerbewegung geht nicht in
+  den Schwung der Pfeile ein
+- Die Bewegungsprüfung kennt keine Fahrzeuge, Elytren und Schwimmen; dass
+  ein Client mehr als eine Position pro Client-Tick schickt, wird nicht
+  geprüft (`ClientTickEnd`)
 
 ## Noch mit einem echten Client zu prüfen
 
@@ -83,6 +92,11 @@ echter Minecraft-Client ließ sich in der Entwicklungsumgebung nicht starten.
 - Wasser und Lava fließen sichtbar, Eimer füllen und leeren (Geräusch,
   Animation); fallender Sand; Knochenmehl-Partikel; Bäume wachsen;
   Redstone-Leitungen leuchten nach Stärke, Verstärker und Lampen schalten
+- Kolben fahren flüssig aus und ein (Block-Event), Schleim nimmt Blöcke mit;
+  Beobachter blinken, Komparatoren leuchten; Trichter und Spender (Pfeile,
+  Wasser); Feuer flackert und breitet sich aus, Rauch; Regen und Gewitter,
+  Blitze mit Donner; Flammen auf brennenden Spielern, Luftblasen unter
+  Wasser; Zurücksetzen bei zu weiten Sprüngen
 
 ## Nach Fertigstellung: Mod-Schicht für Fabric und Forge
 

@@ -164,8 +164,30 @@ Minecraft-Server (Java Edition 26.3) in Rust. Was er kann und der Aufbau stehen 
   `CollectingNeighborUpdater`, nicht rekursiv), dann `updateShape` mit Tiefe
   höchstens 512. `onPlace` kommt bei *jeder* Zustandsänderung, nicht nur bei
   neuem Block; Verstärker melden darüber ihre Ausgabe. Flags wie bei
-  Vanilla (`update::NEIGHBORS` 1, `CLIENTS` 2, `KNOWN_SHAPE` 16,
-  `SUPPRESS_DROPS` 32); Ferrocraft schickt Änderungen immer an die Clients.
+  Vanilla (`update::NEIGHBORS` 1, `CLIENTS` 2, `INVISIBLE` 4, `KNOWN_SHAPE`
+  16, `SUPPRESS_DROPS` 32, `MOVE_BY_PISTON` 64,
+  `SKIP_BLOCK_ENTITY_SIDEEFFECTS` 256). Ohne `CLIENTS` bekommen die Clients
+  die Änderung **nicht**: Kolben setzen ihre `moving_piston`-Blöcke so, und
+  der Client bewegt die Blöcke selbst aus dem Block-Event. Schickt man ihm
+  die Zwischenzustände doch, findet er beim Block-Event schon
+  `moving_piston` vor und die Animation fällt aus.
+- **Block-Events laufen am Ende des Block-Teils eines Ticks**
+  (`runBlockEvents`, nach Zufalls-Ticks und Regen), doppelte werden
+  verworfen; nur wenn das Event etwas tat, geht `block_event` an die
+  Clients. `handling_tick` entspricht `ServerLevel.isHandlingTick` (Kolben
+  entscheiden damit zwischen Einfahren und Fallenlassen).
+- **Landende Blöcke kommen in Positionsreihenfolge**: Block-Entities ticken
+  nach Position sortiert, ein Kolbenkopf kann also vor dem geschobenen Block
+  ankommen. Tests auf mehrere Blöcke gemeinsam warten lassen
+  (`all_become` in `tests/pistons.rs`).
+- **Schleim am Boden klebt am Boden**: Gras und Erde sind schiebbar, ein
+  Schleimblock auf der Grasschicht will die ganze Reihe mitnehmen und der
+  Kolben fährt nicht aus (bei Vanilla genauso). Testaufbauten mit Schleim
+  in die Luft setzen.
+- **Komparatoren hören über `container_changed`**: Wer Behälterinhalte
+  ändert (Menü-Klicks, Trichter, Werfer, Öfen), ruft es auf
+  (`updateNeighbourForOutputSignal`); `set_block` mit `NEIGHBORS` tut es für
+  Blöcke mit `flags::ANALOG` selbst.
 - **Verhalten nach Vanillas Klasse**: `blocks.json` trägt je Block die
   Klassenkette (`CropBlock`, `FallingBlock`, …), `Kind::of` wählt daraus.
   Die Flags je Zustand (fest, Zufalls-Ticks, Redstone-Leiter, ersetzbar,
@@ -190,4 +212,23 @@ Minecraft-Server (Java Edition 26.3) in Rust. Was er kann und der Aufbau stehen 
 - **Gegenprobe Block für Block**: dieselben Befehle auf einem Vanilla- und
   einem Ferrocraft-Server, Vanilla mit `save-all flush`, Ferrocraft per
   SIGTERM speichern, dann `cargo run --release --example compare_worlds`.
-  Unterschiede bei Gras/Erde sind Zufalls-Ticks.
+  Unterschiede bei Gras/Erde sind Zufalls-Ticks. Beide Konsolen lesen
+  Befehle von der Standardeingabe (`tail -F console.in | ferrocraft`);
+  Zeilen, die zusammen kommen, laufen wie bei Vanilla im selben Tick.
+- **Die Konsole liest auf einem eigenen Thread**: ein blockierendes
+  `stdin`-Lesen in tokios Pool hält beim Beenden die Laufzeit und damit den
+  Prozess fest (SIGTERM endete nie). Antworten werden mit Vanillas
+  `en_us.json` (aus dem Server-Jar, `data/<version>/en_us.json`) gerendert.
+- **Die Bewegungsprüfung gilt auch in Tests**: mehr als zehn Blöcke pro
+  Tick werden zurückgesetzt, Bewegungen in Blöcke auch im Kreativmodus.
+  Weite Wege mit `walk_steps` gehen (acht Blöcke pro Tick) oder per
+  `/gamerule player_movement_check false`.
+- **Spielregeln und Wetter liegen nicht in `level.dat`**: 26.3 speichert
+  sie als `data/minecraft/game_rules.dat` (Schlüssel `minecraft:<regel>`,
+  Byte oder Int) und `data/minecraft/weather.dat`.
+- **Blockdaten für Kolben, Komparatoren und Feuer**: `scripts/BlockPhysics.java`
+  schreibt die `PushReaction` (3 Bit ab Bit 12, Reihenfolge der Enum:
+  push_pull, push, popped, immovable, ignore), `hasAnalogOutputSignal`
+  (Bit 15), `ignitedByLava` (Bit 16) und je Block `fire` (Ignite- und
+  Burn-Odds aus den privaten Maps von `FireBlock`). Der Regen hört an
+  `#blocks_motion_in_heightmap` auf, das ist ein Tag, kein Flag.

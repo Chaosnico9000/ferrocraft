@@ -10,11 +10,15 @@ use ferrocraft_protocol::codec::BlockPos;
 use ferrocraft_protocol::packets::play::{ItemStack, LpVec3, SetEntityMotion};
 use uuid::Uuid;
 
+use ferrocraft_protocol::Nbt;
+
 use super::blocks::{Kind, below};
 use super::fluid::Fluid;
+use super::mob::save::{doubles, read_doubles, uuid_from_nbt, uuid_to_nbt};
 use super::tracker::{Pose, Tracker};
 use super::{Encoded, EntityState, Game, Outbound, physics};
 use crate::data::{Aabb, flags};
+use crate::storage::{state_from_nbt, state_to_nbt};
 use crate::world::{MAX_Y, MIN_Y};
 
 const GRAVITY: f64 = 0.04;
@@ -141,6 +145,80 @@ impl Game {
             time: 0,
             tracker: Tracker::new(&pose, UPDATE_INTERVAL),
             sent_velocity: [0.0; 3],
+            entity_state: None,
+        };
+        let entity_state = falling.state(self.falling_type());
+        self.falling.insert(entity_id, falling);
+        self.broadcast(None, &Outbound::EntityAdded(entity_state));
+    }
+
+    /// `FallingBlockEntity.addAdditionalSaveData` after the entity's own.
+    pub(super) fn falling_nbt(&self) -> Vec<([f64; 3], Nbt)> {
+        let data = &self.context.data;
+        self.falling
+            .values()
+            .map(|f| {
+                let anvil = data.state_in_tag(f.block, "minecraft:anvil");
+                let nbt = Nbt::Compound(vec![
+                    (
+                        "id".to_owned(),
+                        Nbt::String("minecraft:falling_block".into()),
+                    ),
+                    ("Pos".into(), doubles(&f.pos)),
+                    ("Motion".into(), doubles(&f.velocity)),
+                    (
+                        "Rotation".into(),
+                        Nbt::List(vec![Nbt::Float(0.0), Nbt::Float(0.0)]),
+                    ),
+                    ("OnGround".into(), Nbt::Byte(i8::from(f.on_ground))),
+                    ("UUID".into(), uuid_to_nbt(f.uuid)),
+                    ("BlockState".into(), state_to_nbt(f.block, data)),
+                    ("Time".into(), Nbt::Int(f.time as i32)),
+                    ("DropItem".into(), Nbt::Byte(1)),
+                    ("HurtEntities".into(), Nbt::Byte(i8::from(anvil))),
+                    (
+                        "FallHurtAmount".into(),
+                        Nbt::Float(if anvil { 2.0 } else { 0.0 }),
+                    ),
+                    ("FallHurtMax".into(), Nbt::Int(40)),
+                    ("CancelDrop".into(), Nbt::Byte(0)),
+                ]);
+                (f.pos, nbt)
+            })
+            .collect()
+    }
+
+    /// A falling block from the entity store, falling on.
+    pub(super) fn revive_falling(&mut self, entity_id: i32, nbt: &Nbt) {
+        let data = Arc::clone(&self.context.data);
+        let (Some(pos), Some(block)) = (
+            read_doubles(nbt, "Pos"),
+            nbt.get("BlockState").and_then(|s| state_from_nbt(s, &data)),
+        ) else {
+            return;
+        };
+        let velocity = read_doubles(nbt, "Motion").unwrap_or_default();
+        let time = match nbt.get("Time") {
+            Some(Nbt::Int(t)) => (*t).max(0) as u32,
+            _ => 0,
+        };
+        let pose = Pose {
+            pos,
+            yaw: 0.0,
+            pitch: 0.0,
+            head_yaw: 0.0,
+            on_ground: false,
+        };
+        let mut falling = FallingBlock {
+            entity_id,
+            uuid: uuid_from_nbt(nbt).unwrap_or_else(Uuid::new_v4),
+            block,
+            pos,
+            velocity,
+            on_ground: matches!(nbt.get("OnGround"), Some(Nbt::Byte(1))),
+            time,
+            tracker: Tracker::new(&pose, UPDATE_INTERVAL),
+            sent_velocity: velocity,
             entity_state: None,
         };
         let entity_state = falling.state(self.falling_type());

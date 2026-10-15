@@ -170,36 +170,49 @@ pub fn screen_data(entity: &BlockEntity) -> [i32; 4] {
 }
 
 impl Game {
-    /// Every furnace for one tick.
-    pub(super) fn tick_furnaces(&mut self) {
-        let data = Arc::clone(&self.context.data);
+    /// `Level.tickBlockEntities`: furnaces, moving pistons and hoppers.
+    pub(super) fn tick_block_entities(&mut self) {
         let world = Arc::clone(&self.context.world);
         for pos in world.ticking_block_entities() {
-            let Some(cooker) = world.block_entity(pos).and_then(|e| Cooker::of(&e.kind)) else {
+            let Some(kind) = world.block_entity(pos).map(|e| e.kind) else {
                 continue;
             };
-            let mut outcome = Outcome::default();
-            world.change_block_entity(pos, |entity| {
-                outcome = tick(entity, cooker, &data);
-                outcome.changed
-            });
-            if let Some(lit) = outcome.lit {
-                let state = world.block(pos);
-                if let Some((_, block)) = data.block_of(state)
-                    && let Some(changed) =
-                        block.with(state, "lit", if lit { "true" } else { "false" })
-                {
-                    self.set_block(pos, changed);
-                }
-            }
-            if let Some(bucket) = outcome.remainder {
-                self.pop_resource(pos, bucket);
-            }
-            if outcome.changed {
-                self.refresh_viewers(pos);
+            match kind.as_str() {
+                "minecraft:piston" => self.tick_moving(pos),
+                "minecraft:hopper" => self.tick_hopper(pos),
+                _ => self.tick_furnace(pos),
             }
         }
         self.send_furnace_data();
+    }
+
+    /// `AbstractFurnaceBlockEntity.serverTick`.
+    fn tick_furnace(&mut self, pos: BlockPos) {
+        let data = Arc::clone(&self.context.data);
+        let world = Arc::clone(&self.context.world);
+        let Some(cooker) = world.block_entity(pos).and_then(|e| Cooker::of(&e.kind)) else {
+            return;
+        };
+        let mut outcome = Outcome::default();
+        world.change_block_entity(pos, |entity| {
+            outcome = tick(entity, cooker, &data);
+            outcome.changed
+        });
+        if let Some(lit) = outcome.lit {
+            let state = world.block(pos);
+            if let Some((_, block)) = data.block_of(state)
+                && let Some(changed) = block.with(state, "lit", if lit { "true" } else { "false" })
+            {
+                self.set_block(pos, changed);
+            }
+        }
+        if let Some(bucket) = outcome.remainder {
+            self.pop_resource(pos, bucket);
+        }
+        if outcome.changed {
+            self.refresh_viewers(pos);
+            self.container_changed(pos);
+        }
     }
 
     /// The screens of everyone looking into the container at `pos`.

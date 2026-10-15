@@ -24,6 +24,8 @@ curl -fsS -o "$work/server.jar" "$(curl -fsS "$meta" | jq -r .downloads.server.u
 classpath="$(find "$work/versions" "$work/libraries" -name '*.jar' | tr '\n' ':')"
 (cd "$work" && java -cp "$classpath" "$root/scripts/BlockPhysics.java" gen/block_physics.json >/dev/null)
 (cd "$work" && java -cp "$classpath" "$root/scripts/EntityInfo.java" gen/entity_info.json >/dev/null)
+# The English texts, for what the console shows of translated messages.
+unzip -p "$work/versions/$version/server-$version.jar" assets/minecraft/lang/en_us.json >"$work/gen/en_us.json"
 
 mkdir -p "$root/data/$version"
 cp "$work/gen/reports/packets.json" "$root/data/$version/"

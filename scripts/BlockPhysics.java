@@ -20,7 +20,9 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.EntityBlock;
+import net.minecraft.world.level.block.FireBlock;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.level.block.SupportType;
 import net.minecraft.world.level.block.state.BlockState;
@@ -69,6 +71,15 @@ public class BlockPhysics {
         collisions.add(new JsonArray());
         faces.add(new JsonArray());
 
+        // How readily blocks catch fire and burn away (`FireBlock.setFlammable`),
+        // kept in private maps of the fire block.
+        var igniteField = FireBlock.class.getDeclaredField("igniteOdds");
+        var burnField = FireBlock.class.getDeclaredField("burnOdds");
+        igniteField.setAccessible(true);
+        burnField.setAccessible(true);
+        var igniteOdds = (it.unimi.dsi.fastutil.objects.Object2IntMap<Block>) igniteField.get(Blocks.FIRE);
+        var burnOdds = (it.unimi.dsi.fastutil.objects.Object2IntMap<Block>) burnField.get(Blocks.FIRE);
+
         JsonObject blocks = new JsonObject();
         for (Block block : BuiltInRegistries.BLOCK) {
             JsonObject out = new JsonObject();
@@ -84,6 +95,12 @@ public class BlockPhysics {
                 classes.add(c.getSimpleName());
             }
             out.add("classes", classes);
+            if (igniteOdds.getInt(block) > 0 || burnOdds.getInt(block) > 0) {
+                JsonArray fire = new JsonArray();
+                fire.add(igniteOdds.getInt(block));
+                fire.add(burnOdds.getInt(block));
+                out.add("fire", fire);
+            }
             if (block instanceof EntityBlock) {
                 // Asking the types avoids constructing block entities, some of
                 // which need more of the game than the bootstrap sets up.
@@ -101,8 +118,11 @@ public class BlockPhysics {
             // 4 conducts redstone, 8 replaceable (`canBeReplaced`), 16 << d
             // the face in direction d is sturdy, 1024 the top can hold
             // something in its centre (a standing torch), 2048 a signal
-            // source; last the outline shape (`getShape`), which aiming
-            // hits.
+            // source, 7 << 12 how pistons move it (`PushReaction` ordinal:
+            // push and pull, push only, popped, immovable, ignore), 1 << 15 a
+            // comparator reads it (`hasAnalogOutputSignal`), 1 << 16 lava
+            // sets it on fire;
+            // last the outline shape (`getShape`), which aiming hits.
             JsonArray states = new JsonArray();
             List<String> seen = new ArrayList<>();
             for (BlockState state : block.getStateDefinition().getPossibleStates()) {
@@ -127,6 +147,9 @@ public class BlockPhysics {
                 }
                 if (state.isFaceSturdy(level, pos, Direction.UP, SupportType.CENTER)) flags |= 1024;
                 if (state.isSignalSource()) flags |= 2048;
+                flags |= state.getPistonPushReaction().ordinal() << 12;
+                if (state.hasAnalogOutputSignal()) flags |= 1 << 15;
+                if (state.ignitedByLava()) flags |= 1 << 16;
                 s.add(flags);
                 s.add(collisions.add(boxes(state.getShape(level, pos))));
                 states.add(s);

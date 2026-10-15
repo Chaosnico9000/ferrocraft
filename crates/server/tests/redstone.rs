@@ -6,7 +6,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{Client, click, join, read_matching, start, test_config, walk};
+use common::{Client, click, join, read_matching, start, test_config, walk, walk_steps};
 use ferrocraft::Config;
 use ferrocraft::data::GameData;
 use ferrocraft_protocol::codec::BlockPos;
@@ -135,7 +135,7 @@ async fn a_redstone_torch_goes_out_when_its_block_is_powered() {
     run(&mut alex, "setblock 10 -60 3 stone").await;
     run(&mut alex, "setblock 10 -59 3 redstone_torch").await;
     run(&mut alex, "setblock 11 -60 3 lever[face=wall,facing=east]").await;
-    walk(&mut alex, [12.5, -60.0, 1.5], None).await;
+    walk_steps(&mut alex, [0.5, -60.0, 0.5], [12.5, -60.0, 1.5]).await;
     settle(&mut alex).await;
     alex.send(&click(at(11, -60, 3), 1, 1)).await;
     becomes(&mut alex, at(10, -59, 3), 2, |s| {
@@ -163,7 +163,7 @@ async fn a_repeater_passes_power_on_after_its_delay() {
     )
     .await;
     run(&mut alex, "setblock 20 -60 4 redstone_lamp").await;
-    walk(&mut alex, [22.5, -60.0, 6.5], None).await;
+    walk_steps(&mut alex, [0.5, -60.0, 0.5], [22.5, -60.0, 6.5]).await;
     settle(&mut alex).await;
     alex.send(&click(at(20, -60, 6), 1, 1)).await;
     // The lever moves first; eight game ticks later the repeater, then the

@@ -36,6 +36,10 @@ pub struct Config {
     pub monsters: bool,
     /// peaceful, easy, normal or hard, like vanilla's `difficulty`.
     pub difficulty: String,
+    /// Players in survival may float above the ground, as with a flying
+    /// mod; otherwise they are disconnected after four seconds of it.
+    /// Vanilla's `allow-flight`.
+    pub allow_flight: bool,
 }
 
 impl Default for Config {
@@ -54,6 +58,7 @@ impl Default for Config {
             animals: true,
             monsters: true,
             difficulty: "easy".into(),
+            allow_flight: false,
         }
     }
 }

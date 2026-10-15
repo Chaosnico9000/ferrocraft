@@ -201,24 +201,42 @@ pub fn tree(data: &GameData, permission: u8) -> Commands {
         let from = t.argument("from", "minecraft:block_pos", Vec::new(), false, vec![to]);
         root.push(t.literal("fill", false, vec![from]));
 
-        // `gamerule <rule> [value]` for the rules Ferrocraft has.
+        // `gamerule <rule> [value]` for every rule.
         let mut rules = Vec::new();
-        for (rule, kind) in GAME_RULES {
-            let value = match kind {
-                RuleKind::Int => t.argument(
-                    "value",
-                    "brigadier:integer",
-                    [&[1u8][..], &0i32.to_be_bytes()].concat(),
-                    true,
-                    Vec::new(),
-                ),
-                RuleKind::Bool => {
+        for rule in crate::rules::RULES {
+            let value = match rule.default {
+                crate::rules::Value::Int(_) => {
+                    // `IntegerArgumentType` flags: 1 has a minimum, 2 a
+                    // maximum.
+                    let mut properties = vec![1u8];
+                    properties.extend(rule.min.to_be_bytes());
+                    if rule.max != i32::MAX {
+                        properties[0] |= 2;
+                        properties.extend(rule.max.to_be_bytes());
+                    }
+                    t.argument("value", "brigadier:integer", properties, true, Vec::new())
+                }
+                crate::rules::Value::Bool(_) => {
                     t.argument("value", "brigadier:bool", Vec::new(), true, Vec::new())
                 }
             };
-            rules.push(t.literal(rule, true, vec![value]));
+            rules.push(t.literal(rule.name, true, vec![value]));
         }
         root.push(t.literal("gamerule", false, rules));
+
+        // `weather clear|rain|thunder [duration]`.
+        let mut kinds = Vec::new();
+        for kind in ["clear", "rain", "thunder"] {
+            let duration = t.argument(
+                "duration",
+                "minecraft:time",
+                1i32.to_be_bytes().to_vec(),
+                true,
+                Vec::new(),
+            );
+            kinds.push(t.literal(kind, true, vec![duration]));
+        }
+        root.push(t.literal("weather", false, kinds));
     }
     let root = t.add(NodeKind::Root, false, root);
     Commands {
@@ -226,19 +244,6 @@ pub fn tree(data: &GameData, permission: u8) -> Commands {
         root,
     }
 }
-
-#[derive(Debug, Clone, Copy)]
-enum RuleKind {
-    Int,
-    Bool,
-}
-
-/// The game rules Ferrocraft has, by their 26.3 names.
-const GAME_RULES: &[(&str, RuleKind)] = &[
-    ("random_tick_speed", RuleKind::Int),
-    ("water_source_conversion", RuleKind::Bool),
-    ("lava_source_conversion", RuleKind::Bool),
-];
 
 /// `/fill` and `/setblock` change at most this many blocks
 /// (`max_block_modifications`).
@@ -315,9 +320,45 @@ fn parse_coordinate(word: &str, base: f64, center: bool) -> Option<f64> {
 }
 
 impl Game {
+    /// The sender as the target of a command without one; the console is
+    /// no player.
+    fn myself(&self, sender: i32) -> Result<Vec<i32>, Nbt> {
+        if self.players.contains_key(&sender) {
+            Ok(vec![sender])
+        } else {
+            Err(error("permissions.requires.player", Vec::new()))
+        }
+    }
+
+    /// Where a command runs: the player's position, the world spawn for the
+    /// console.
+    fn source_pos(&self, sender: i32) -> [f64; 3] {
+        self.players.get(&sender).map_or_else(
+            || {
+                let spawn = self.context.level.spawn;
+                [f64::from(spawn.x), f64::from(spawn.y), f64::from(spawn.z)]
+            },
+            |p| p.pos,
+        )
+    }
+
     /// Players a selector or name stands for.
     fn targets(&self, sender: i32, word: &str) -> Vec<i32> {
         match word {
+            "@s" if !self.players.contains_key(&sender) => Vec::new(),
+            "@p" if !self.players.contains_key(&sender) => {
+                // The player nearest to the spawn, where the console is.
+                let from = self.source_pos(sender);
+                let distance = |p: &[f64; 3]| -> f64 {
+                    p.iter().zip(from).map(|(a, b)| (a - b) * (a - b)).sum()
+                };
+                self.players
+                    .values()
+                    .min_by(|a, b| distance(&a.pos).total_cmp(&distance(&b.pos)))
+                    .map(|p| p.entity_id)
+                    .into_iter()
+                    .collect()
+            }
             "@s" | "@p" => vec![sender],
             "@a" | "@e" => self.players.keys().copied().collect(),
             "@r" => self
@@ -349,8 +390,25 @@ impl Game {
         };
         info!("{} issued server command: /{line}", player.name());
         let permission = player.permission;
+        let reply = self.execute(sender, permission, line);
+        let content = match reply {
+            Ok(message) | Err(message) => message,
+        };
+        if let Some(player) = self.players.get(&sender) {
+            player.send(super::Outbound::Packet(std::sync::Arc::new(
+                super::Encoded::new(&ferrocraft_protocol::packets::play::SystemChat {
+                    content,
+                    overlay: false,
+                }),
+            )));
+        }
+    }
+
+    /// Runs a command for a player or the console with the given
+    /// permission; the answer.
+    pub(super) fn execute(&mut self, sender: i32, permission: u8, line: &str) -> Reply {
         let words: Vec<&str> = line.split_whitespace().collect();
-        let reply = match words.as_slice() {
+        match words.as_slice() {
             ["list"] => Ok(self.list()),
             [name, ..] if permission < OPERATOR && *name != "list" => {
                 Err(error("command.unknown.command", Vec::new()))
@@ -369,9 +427,10 @@ impl Game {
                 self.fill_command(sender, [x1, y1, z1], [x2, y2, z2], block, rest)
             }
             ["gamerule", rule, rest @ ..] => self.gamerule_command(rule, rest),
+            ["weather", kind, rest @ ..] => self.weather_command(kind, rest),
             ["kill", rest @ ..] => {
                 let victims = match rest {
-                    [] => vec![sender],
+                    [] => self.myself(sender)?,
                     [target] => self.targets(sender, target),
                     _ => Vec::new(),
                 };
@@ -390,17 +449,6 @@ impl Game {
                 }
             }
             _ => Err(error("command.unknown.command", Vec::new())),
-        };
-        let content = match reply {
-            Ok(message) | Err(message) => message,
-        };
-        if let Some(player) = self.players.get(&sender) {
-            player.send(super::Outbound::Packet(std::sync::Arc::new(
-                super::Encoded::new(&ferrocraft_protocol::packets::play::SystemChat {
-                    content,
-                    overlay: false,
-                }),
-            )));
         }
     }
 
@@ -423,7 +471,7 @@ impl Game {
             return Err(error("argument.gamemode.invalid", vec![text::plain(mode)]));
         };
         let targets = match rest {
-            [] => vec![sender],
+            [] => self.myself(sender)?,
             [target] => self.targets(sender, target),
             _ => return Err(error("command.unknown.argument", Vec::new())),
         };
@@ -502,7 +550,7 @@ impl Game {
     fn tp_command(&mut self, sender: i32, rest: &[&str]) -> Reply {
         let position = |game: &Game, who: i32| game.players.get(&who).map(|p| p.pos);
         let (movers, words) = match rest {
-            [_] | [_, _, _] => (vec![sender], rest),
+            [_] | [_, _, _] => (self.myself(sender)?, rest),
             [target, more @ ..] => (self.targets(sender, target), more),
             [] => return Err(error("command.unknown.argument", Vec::new())),
         };
@@ -558,10 +606,12 @@ impl Game {
         } else {
             format!("minecraft:{entity}")
         };
-        let Some(kind) = super::mob::Kind::from_name(&name) else {
+        let lightning = name == "minecraft:lightning_bolt";
+        let kind = super::mob::Kind::from_name(&name);
+        if kind.is_none() && !lightning {
             return Err(error("commands.summon.failed", Vec::new()));
-        };
-        let base = self.players.get(&sender).map(|p| p.pos).unwrap_or_default();
+        }
+        let base = self.source_pos(sender);
         let pos = match rest {
             [] => base,
             [x, y, z] => {
@@ -577,8 +627,20 @@ impl Game {
             }
             _ => return Err(error("command.unknown.argument", Vec::new())),
         };
-        if self.spawn_mob(kind, pos).is_none() {
-            return Err(error("commands.summon.failed", Vec::new()));
+        match kind {
+            Some(kind) => {
+                if self.spawn_mob(kind, pos).is_none() {
+                    return Err(error("commands.summon.failed", Vec::new()));
+                }
+            }
+            None => self.strike(
+                BlockPos {
+                    x: pos[0].floor() as i32,
+                    y: pos[1].floor() as i32,
+                    z: pos[2].floor() as i32,
+                },
+                false,
+            ),
         }
         let key = format!("entity.{}", name.replace(':', "."));
         Ok(text::translate(
@@ -590,7 +652,7 @@ impl Game {
 
     /// A block position from three words, `~` relative to the sender.
     fn block_pos(&self, sender: i32, words: [&&str; 3]) -> Result<BlockPos, Nbt> {
-        let base = self.players.get(&sender).map(|p| p.pos).unwrap_or_default();
+        let base = self.source_pos(sender);
         let mut at = [0; 3];
         for (i, word) in words.iter().enumerate() {
             let value = parse_coordinate(word, base[i].floor(), false)
@@ -763,48 +825,60 @@ impl Game {
 
     /// `/gamerule <rule> [value]`.
     fn gamerule_command(&mut self, rule: &str, rest: &[&str]) -> Reply {
-        let Some(&(rule, kind)) = GAME_RULES.iter().find(|(name, _)| *name == rule) else {
+        let Some(current) = self.rules.get(rule) else {
             return Err(error("command.unknown.argument", Vec::new()));
         };
-        let rules = &mut self.rules;
-        let value = match rest {
-            [] => match rule {
-                "random_tick_speed" => rules.random_tick_speed.to_string(),
-                "water_source_conversion" => rules.water_source_conversion.to_string(),
-                _ => rules.lava_source_conversion.to_string(),
-            },
+        let name = rule.strip_prefix("minecraft:").unwrap_or(rule);
+        match rest {
+            [] => Ok(text::translate(
+                "commands.gamerule.query",
+                vec![text::plain(name), text::plain(&current.to_string())],
+                None,
+            )),
             [value] => {
-                match (kind, rule) {
-                    (RuleKind::Int, _) => {
-                        let n: u32 = value
-                            .parse()
-                            .map_err(|_| error("parsing.int.invalid", vec![text::plain(value)]))?;
-                        rules.random_tick_speed = n;
-                    }
-                    (RuleKind::Bool, rule) => {
-                        let b: bool = value
-                            .parse()
-                            .map_err(|_| error("parsing.bool.invalid", vec![text::plain(value)]))?;
-                        if rule == "water_source_conversion" {
-                            rules.water_source_conversion = b;
-                        } else {
-                            rules.lava_source_conversion = b;
-                        }
-                    }
-                }
-                return Ok(text::translate(
+                use crate::rules::Refused;
+                let plain = text::plain(value);
+                let set = self.rules.set(rule, value).map_err(|why| match why {
+                    Refused::Unknown => error("command.unknown.argument", Vec::new()),
+                    Refused::NotABool => error("parsing.bool.invalid", vec![plain.clone()]),
+                    Refused::NotANumber => error("parsing.int.invalid", vec![plain.clone()]),
+                    Refused::TooLow(min) => error(
+                        "argument.integer.low",
+                        vec![text::plain(&min.to_string()), plain.clone()],
+                    ),
+                    Refused::TooHigh(max) => error(
+                        "argument.integer.big",
+                        vec![text::plain(&max.to_string()), plain.clone()],
+                    ),
+                })?;
+                Ok(text::translate(
                     "commands.gamerule.set",
-                    vec![text::plain(rule), text::plain(value)],
+                    vec![text::plain(name), text::plain(&set.to_string())],
                     None,
-                ));
+                ))
             }
+            _ => Err(error("command.unknown.argument", Vec::new())),
+        }
+    }
+
+    /// `/weather clear|rain|thunder [duration]`.
+    fn weather_command(&mut self, kind: &str, rest: &[&str]) -> Reply {
+        let duration = match rest {
+            [] => None,
+            [time] => match parse_time(time) {
+                Some(t) if t >= 1 => Some(t.min(i64::from(i32::MAX)) as i32),
+                _ => return Err(error("argument.time.invalid_unit", Vec::new())),
+            },
             _ => return Err(error("command.unknown.argument", Vec::new())),
         };
-        Ok(text::translate(
-            "commands.gamerule.query",
-            vec![text::plain(rule), text::plain(&value)],
-            None,
-        ))
+        let key = match kind {
+            "clear" => "commands.weather.set.clear",
+            "rain" => "commands.weather.set.rain",
+            "thunder" => "commands.weather.set.thunder",
+            _ => return Err(error("command.unknown.argument", Vec::new())),
+        };
+        self.set_weather(kind, duration);
+        Ok(text::translate(key, Vec::new(), None))
     }
 
     /// `/difficulty [peaceful|easy|normal|hard]`.

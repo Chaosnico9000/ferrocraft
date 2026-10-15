@@ -452,6 +452,9 @@ impl Game {
             .unwrap_or_default();
         self.send_menu(entity_id);
         self.update_viewers(entity_id, &containers);
+        for &pos in &containers {
+            self.container_changed(pos);
+        }
         // What is in hand may have changed.
         self.update_inventory(entity_id, |_| {});
     }
@@ -728,6 +731,12 @@ impl Game {
             self.openers.remove(&pos);
         } else {
             self.openers.insert(pos, viewers);
+        }
+        // `TrappedChestBlockEntity.signalOpenCount`: its power follows the
+        // count.
+        if name == "minecraft:trapped_chest" {
+            self.update_neighbors_at(pos, block_id);
+            self.update_neighbors_at(super::blocks::below(pos), block_id);
         }
         if lid {
             let packet = Encoded::new(&BlockEvent {

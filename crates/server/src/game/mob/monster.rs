@@ -472,15 +472,16 @@ impl Game {
             let Some(mob) = self.mobs.get(&entity_id) else {
                 return;
             };
-            let at = mob.pos;
+            let (at, charged) = (mob.pos, mob.charged);
             // `Creeper.explodeCreeper`: the blast takes the creeper with it,
-            // after naming it in the death messages.
+            // after naming it in the death messages; a charged creeper's is
+            // twice as big.
             self.explode(Blast {
                 center: at,
-                radius: CREEPER_BLAST,
+                radius: CREEPER_BLAST * if charged { 2.0 } else { 1.0 },
                 source: Some(entity_id),
                 attacker: Some(entity_id),
-                breaks_blocks: true,
+                breaks_blocks: self.rules.flag("mob_griefing"),
                 decay: true,
             });
             self.remove_mob(entity_id);

@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use ferrocraft_protocol::codec::BlockPos;
-use ferrocraft_protocol::packets::play::{Direction, LevelEvent};
+use ferrocraft_protocol::packets::play::{BlockEvent, Direction, LevelEvent};
 use rand::Rng;
 
 use super::fluid::Fluid;
@@ -27,13 +27,21 @@ use crate::world::chunk_of;
 pub mod update {
     /// Neighbours hear of it (`neighborChanged`).
     pub const NEIGHBORS: u32 = 1;
-    /// Clients see it; Ferrocraft always sends changes.
+    /// Clients see it. Without it they are not told, as of the blocks a
+    /// piston moves, which clients move themselves.
     pub const CLIENTS: u32 = 2;
+    /// Clients do not redraw it (client side only).
+    pub const INVISIBLE: u32 = 4;
     /// The neighbours' shapes are known not to change (`updateShape` is
     /// skipped).
     pub const KNOWN_SHAPE: u32 = 16;
     /// Blocks a shape update removes drop nothing.
     pub const SUPPRESS_DROPS: u32 = 32;
+    /// A piston moves it: the old block's neighbours hear of its removal
+    /// even without [`NEIGHBORS`].
+    pub const MOVE_BY_PISTON: u32 = 64;
+    /// The old block entity goes without its side effects.
+    pub const SKIP_BLOCK_ENTITY_SIDEEFFECTS: u32 = 256;
     pub const ALL: u32 = NEIGHBORS | CLIENTS;
 }
 
@@ -155,6 +163,19 @@ pub enum Kind {
     Tnt,
     /// `PoweredBlock`: the redstone block.
     RedstoneBlock,
+    /// `PistonBaseBlock`: pistons and sticky pistons.
+    Piston,
+    PistonHead,
+    /// `MovingPistonBlock`: a block on its way.
+    MovingPiston,
+    Observer,
+    Comparator,
+    Hopper,
+    Dispenser,
+    Dropper,
+    TrappedChest,
+    /// `BaseFireBlock`: fire and soul fire.
+    Fire,
 }
 
 impl Kind {
@@ -194,6 +215,16 @@ impl Kind {
             ("FenceGateBlock", Kind::FenceGate),
             ("TntBlock", Kind::Tnt),
             ("PoweredBlock", Kind::RedstoneBlock),
+            ("PistonBaseBlock", Kind::Piston),
+            ("PistonHeadBlock", Kind::PistonHead),
+            ("MovingPistonBlock", Kind::MovingPiston),
+            ("ObserverBlock", Kind::Observer),
+            ("ComparatorBlock", Kind::Comparator),
+            ("HopperBlock", Kind::Hopper),
+            ("DropperBlock", Kind::Dropper),
+            ("DispenserBlock", Kind::Dispenser),
+            ("TrappedChestBlock", Kind::TrappedChest),
+            ("BaseFireBlock", Kind::Fire),
         ];
         // The most specific class comes first in `classes`.
         for class in &block.classes {
@@ -252,6 +283,11 @@ impl Ticks {
         self.running.contains(&(pos, target))
     }
 
+    /// `hasScheduledTick`.
+    pub fn is_scheduled(&self, pos: BlockPos, target: Target) -> bool {
+        self.pending.contains(&(pos, target))
+    }
+
     fn take_due(&mut self, now: u64) -> Vec<(BlockPos, Target)> {
         let mut due = Vec::new();
         while due.len() < MAX_TICKS_PER_TICK {
@@ -289,6 +325,16 @@ impl Ticks {
     pub fn len(&self) -> usize {
         self.queue.len()
     }
+}
+
+/// A block event waiting for the end of the tick (`BlockEventData`), such
+/// as a piston about to move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockEventData {
+    pos: BlockPos,
+    block: usize,
+    b0: u8,
+    b1: u8,
 }
 
 /// A pending `neighborChanged`: one block, or the six around a position.
@@ -333,7 +379,7 @@ impl Game {
         self.context.data.state_is(state, name)
     }
 
-    pub(super) fn flag(&self, state: u32, flag: u16) -> bool {
+    pub(super) fn flag(&self, state: u32, flag: u32) -> bool {
         self.context.data.physics(state).has(flag)
     }
 
@@ -401,18 +447,24 @@ impl Game {
         if !self.context.world.set_block(pos, state) {
             return false;
         }
-        self.broadcast(None, &Outbound::BlockChanged { pos, state });
-        let (old_id, new_id) = (self.block_id(old), self.block_id(state));
-        if old_id != new_id && flags & update::NEIGHBORS != 0 {
-            self.after_removal(pos, old);
+        if flags & update::CLIENTS != 0 {
+            self.broadcast(None, &Outbound::BlockChanged { pos, state });
         }
-        self.on_place(pos, state, old);
+        let moved = flags & update::MOVE_BY_PISTON != 0;
+        let (old_id, new_id) = (self.block_id(old), self.block_id(state));
+        if old_id != new_id && (flags & update::NEIGHBORS != 0 || moved) {
+            self.after_removal_moved(pos, old, moved);
+        }
+        self.on_place(pos, state, old, moved);
         if self.context.world.block(pos) != state {
             // `onPlace` replaced it, as burning TNT does.
             return true;
         }
         if flags & update::NEIGHBORS != 0 {
             self.update_neighbors_at(pos, old_id);
+            if self.flag(state, flags::ANALOG) {
+                self.update_neighbour_for_output_signal(pos, new_id);
+            }
         }
         if flags & update::KNOWN_SHAPE == 0 && limit > 0 {
             let flags = flags & !(update::NEIGHBORS | update::SUPPRESS_DROPS);
@@ -509,6 +561,22 @@ impl Game {
         let state = self.context.world.block(pos);
         let new = self.update_shape(pos, state, direction, source, source_state);
         self.update_or_destroy(pos, state, new, flags, limit);
+    }
+
+    /// `BlockState.updateNeighbourShapes` with the full depth, for blocks
+    /// set without shape updates.
+    pub(super) fn update_neighbour_shapes_of(&mut self, pos: BlockPos, state: u32, flags: u32) {
+        self.update_neighbour_shapes(pos, state, flags, UPDATE_LIMIT);
+    }
+
+    /// `BlockState.updateIndirectNeighbourShapes` with the full depth.
+    pub(super) fn update_indirect_shapes_of(&mut self, pos: BlockPos, state: u32, flags: u32) {
+        self.update_indirect_shapes(pos, state, flags, UPDATE_LIMIT);
+    }
+
+    /// `Block.updateOrDestroy` with the full depth.
+    pub(super) fn update_or_destroy_at(&mut self, pos: BlockPos, old: u32, new: u32, flags: u32) {
+        self.update_or_destroy(pos, old, new, flags, UPDATE_LIMIT);
     }
 
     /// `Block.updateOrDestroy`.
@@ -664,7 +732,23 @@ impl Game {
                 }
             }
             Kind::Wire => self.wire_shape(pos, state, direction, neighbour, neighbour_state),
-            Kind::Repeater => self.repeater_shape(pos, state, direction, neighbour_state),
+            Kind::Repeater | Kind::Comparator => {
+                self.diode_shape(pos, state, direction, neighbour_state)
+            }
+            Kind::PistonHead => {
+                if self.direction_value(state, "facing") == Some(opposite(direction))
+                    && !self.head_survives(pos, state)
+                {
+                    self.air
+                } else {
+                    state
+                }
+            }
+            Kind::Observer => {
+                self.observer_shape(pos, state, direction);
+                state
+            }
+            Kind::Fire => self.fire_shape(pos, state),
             _ => state,
         }
     }
@@ -716,7 +800,11 @@ impl Game {
                     || data.physics(below_state).has(flags::CENTER_TOP)
             }
             Kind::Wire => self.wire_survives_on(below_state),
-            Kind::Repeater => data.physics(below_state).sturdy(Direction::Up as usize),
+            Kind::Repeater | Kind::Comparator => {
+                data.physics(below_state).sturdy(Direction::Up as usize)
+            }
+            Kind::PistonHead => self.head_survives(pos, state),
+            Kind::Fire => self.fire_survives(pos, state),
             _ => true,
         }
     }
@@ -838,8 +926,12 @@ impl Game {
             Kind::RedstoneTorch | Kind::RedstoneWallTorch => {
                 self.torch_neighbor_changed(pos, state)
             }
-            Kind::Repeater => self.repeater_neighbor_changed(pos, state),
+            Kind::Repeater | Kind::Comparator => self.diode_neighbor_changed(pos, state),
             Kind::Lamp => self.lamp_neighbor_changed(pos, state),
+            Kind::Piston => self.piston_check(pos, state),
+            Kind::PistonHead => self.head_neighbor_changed(pos, state, source),
+            Kind::Hopper => self.hopper_check_powered(pos, state),
+            Kind::Dispenser | Kind::Dropper => self.dispenser_neighbor_changed(pos, state),
             Kind::Door => self.door_neighbor_changed(pos, state, source),
             Kind::Trapdoor | Kind::FenceGate => self.opening_neighbor_changed(pos, state),
             Kind::Tnt if self.has_neighbor_signal(pos) => {
@@ -851,7 +943,7 @@ impl Game {
     }
 
     /// `onPlace`: the block at `pos` became `state`, which was `old`.
-    fn on_place(&mut self, pos: BlockPos, state: u32, old: u32) {
+    fn on_place(&mut self, pos: BlockPos, state: u32, old: u32, _moved: bool) {
         let same_block = self.block_id(old) == self.block_id(state);
         match self.kind(state) {
             Kind::Liquid => self.liquid_on_place(pos, state),
@@ -860,7 +952,13 @@ impl Game {
             }
             Kind::Wire if !same_block => self.wire_on_place(pos, state),
             Kind::RedstoneTorch | Kind::RedstoneWallTorch => self.torch_notify(pos, state),
-            Kind::Repeater => self.repeater_update_front(pos, state),
+            Kind::Repeater | Kind::Comparator => self.diode_update_front(pos, state),
+            Kind::Piston if !same_block && self.moving_at(pos).is_none() => {
+                self.piston_check(pos, state)
+            }
+            Kind::Observer if !same_block => self.observer_on_place(pos, state),
+            Kind::Hopper if !same_block => self.hopper_check_powered(pos, state),
+            Kind::Fire => self.fire_on_place(pos, state, !same_block),
             Kind::Tnt if !same_block && self.has_neighbor_signal(pos) => {
                 self.set_block(pos, self.air);
                 self.prime_tnt(pos, None, super::tnt::DEFAULT_FUSE);
@@ -876,10 +974,29 @@ impl Game {
     /// `affectNeighborsAfterRemoval`: `old` at `pos` was replaced by another
     /// block.
     pub(super) fn after_removal(&mut self, pos: BlockPos, old: u32) {
+        self.after_removal_moved(pos, old, false);
+    }
+
+    /// `affectNeighborsAfterRemoval`, with whether a piston moved the block.
+    pub(super) fn after_removal_moved(&mut self, pos: BlockPos, old: u32, moved: bool) {
         match self.kind(old) {
             Kind::Wire => self.wire_after_removal(pos, old),
             Kind::RedstoneTorch | Kind::RedstoneWallTorch => self.torch_notify(pos, old),
-            Kind::Repeater => self.repeater_update_front(pos, old),
+            Kind::Repeater | Kind::Comparator if !moved => self.diode_update_front(pos, old),
+            Kind::PistonHead => self.head_removed(pos, old),
+            Kind::Observer => self.observer_removed(pos, old),
+            Kind::Hopper | Kind::Dispenser | Kind::Dropper => {
+                let id = self.block_id(old);
+                self.update_neighbour_for_output_signal(pos, id);
+            }
+            Kind::TrappedChest => {
+                let id = self.block_id(old);
+                self.update_neighbour_for_output_signal(pos, id);
+                if self.openers.contains_key(&pos) {
+                    self.update_neighbors_at(pos, id);
+                    self.update_neighbors_at(below(pos), id);
+                }
+            }
             Kind::Lever | Kind::Button => {
                 if self.bool_value(old, "powered") {
                     self.attached_update(pos, old);
@@ -976,9 +1093,55 @@ impl Game {
             .runs_now(pos, Target::Block(self.block_id(state)))
     }
 
+    pub(super) fn block_tick_scheduled(&self, pos: BlockPos, state: u32) -> bool {
+        self.block_ticks
+            .is_scheduled(pos, Target::Block(self.block_id(state)))
+    }
+
+    // --- Block events --------------------------------------------------------------
+
+    /// `Level.blockEvent`: queued for the end of the tick, once.
+    pub(super) fn block_event(&mut self, pos: BlockPos, block: usize, b0: u8, b1: u8) {
+        let event = BlockEventData { pos, block, b0, b1 };
+        if !self.block_events.contains(&event) {
+            self.block_events.push_back(event);
+        }
+    }
+
+    /// `ServerLevel.runBlockEvents`: each event whose block is still there;
+    /// clients hear of those that happened and play them too.
+    fn run_block_events(&mut self) {
+        while let Some(event) = self.block_events.pop_front() {
+            let state = self.context.world.block(event.pos);
+            if self.block_id(state) != event.block {
+                continue;
+            }
+            let happened = match self.kind(state) {
+                Kind::Piston => self.piston_event(event.pos, state, event.b0, event.b1),
+                _ => false,
+            };
+            if happened {
+                let packet = Encoded::new(&BlockEvent {
+                    pos: event.pos,
+                    event: event.b0,
+                    param: event.b1,
+                    block: event.block as i32,
+                });
+                self.broadcast(
+                    None,
+                    &Outbound::InChunk {
+                        chunk: chunk_of(event.pos),
+                        packet: Arc::new(packet),
+                    },
+                );
+            }
+        }
+    }
+
     /// Scheduled block ticks, then fluid ticks, then random ticks, as
     /// `ServerLevel.tick` runs them.
     pub(super) fn tick_blocks(&mut self) {
+        self.handling_tick = true;
         let now = self.tick;
         for (pos, target) in self.block_ticks.take_due(now) {
             let state = self.context.world.block(pos);
@@ -997,6 +1160,9 @@ impl Game {
         }
         self.fluid_ticks.running.clear();
         self.random_ticks();
+        self.tick_precipitation();
+        self.run_block_events();
+        self.handling_tick = false;
     }
 
     /// `BlockBehaviour.tick`.
@@ -1019,6 +1185,10 @@ impl Game {
             }
             Kind::RedstoneTorch | Kind::RedstoneWallTorch => self.torch_tick(pos, state),
             Kind::Repeater => self.repeater_tick(pos, state),
+            Kind::Comparator => self.comparator_refresh(pos, state),
+            Kind::Observer => self.observer_tick(pos, state),
+            Kind::Dispenser | Kind::Dropper => self.dispense(pos, state),
+            Kind::Fire => self.fire_tick(pos, state),
             Kind::Lamp => {
                 if self.bool_value(state, "lit") && !self.has_neighbor_signal(pos) {
                     let off = self.with(state, "lit", "false");
@@ -1050,7 +1220,7 @@ impl Game {
         let picked = self.context.world.random_ticks(
             &centers,
             SIMULATION_DISTANCE,
-            self.rules.random_tick_speed,
+            self.rules.int("random_tick_speed").max(0) as u32,
             &self.context.data,
             &mut rand::rng(),
         );
@@ -1071,6 +1241,9 @@ impl Game {
             Kind::Spreading => self.grass_random_tick(pos, state),
             Kind::Leaves => self.leaves_random_tick(pos, state),
             Kind::SugarCane | Kind::Cactus => self.column_plant_random_tick(pos, state),
+            Kind::Liquid if self.fluid_state(state).fluid == Some(Fluid::Lava) => {
+                self.lava_random_tick(pos)
+            }
             _ => {}
         }
     }

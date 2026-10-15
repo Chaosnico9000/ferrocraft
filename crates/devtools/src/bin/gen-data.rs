@@ -100,6 +100,10 @@ fn main() -> anyhow::Result<()> {
         ids.insert(registry.clone(), map);
     }
 
+    // The English texts as the server jar has them, for the console.
+    std::fs::copy(generated.join("en_us.json"), out.join("en_us.json"))
+        .context("en_us.json: extract it from the server jar first")?;
+
     let tags = read_tags(&data.join("tags"), &ids)?;
     let physics = read_json(&generated.join("block_physics.json"))
         .context("block_physics.json: run scripts/BlockPhysics.java first")?;
@@ -446,6 +450,9 @@ fn read_blocks(
             });
             if let Some(entity) = block["block_entity"].as_str() {
                 line["block_entity"] = entity.into();
+            }
+            if !block["fire"].is_null() {
+                line["fire"] = block["fire"].clone();
             }
             Ok(format!("    {line}"))
         })

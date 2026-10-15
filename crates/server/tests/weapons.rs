@@ -58,9 +58,12 @@ async fn a_drawn_bow_shoots_hits_and_uses_up_arrows() {
     let data = GameData::load().unwrap();
     let id = |name: &str| data.item_id(name).unwrap();
     let arrow_type = data.entity_type("minecraft:arrow").unwrap();
-    let (cow_type, _) = data.entity("minecraft:cow").unwrap();
     let addr = start(operators()).await;
     let (mut alex, alex_login) = join(addr, "Alex", 4).await;
+    // The target: Steve, six blocks ahead in survival. A cow would stroll
+    // off now and then before the arrow arrives.
+    let (mut steve, steve_login) = join(addr, "Steve", 4).await;
+    walk(&mut steve, [0.5, -60.0, 6.5], None).await;
     // A bow and three arrows, then survival, where both are used up.
     hold_some(&mut alex, id("minecraft:bow"), 1).await;
     alex.send(&SetCreativeModeSlot {
@@ -74,9 +77,9 @@ async fn a_drawn_bow_shoots_hits_and_uses_up_arrows() {
     .await;
     run(&mut alex, "gamemode survival").await;
     read_matching(&mut alex, |e: &GameEvent| e.event == 3).await;
-    // A cow six blocks ahead, Alex looking a little down at it.
-    run(&mut alex, "summon cow 0.5 -60 6.5").await;
-    let cow = read_matching(&mut alex, |a: &AddEntity| a.entity_type == cow_type).await;
+    run(&mut alex, "gamemode survival Steve").await;
+    read_matching(&mut steve, |e: &GameEvent| e.event == 3).await;
+    // Alex looks a little down at Steve.
     walk(&mut alex, [0.5, -60.0, 0.5], Some([0.0, 10.0])).await;
 
     shoot(&mut alex, 1100, 1, 10.0).await;
@@ -98,7 +101,10 @@ async fn a_drawn_bow_shoots_hits_and_uses_up_arrows() {
             }
         }
     }
-    let hit = read_matching(&mut alex, |d: &DamageEvent| d.entity_id == cow.entity_id).await;
+    let hit = read_matching(&mut alex, |d: &DamageEvent| {
+        d.entity_id == steve_login.entity_id
+    })
+    .await;
     assert_eq!(hit.cause, Some(alex_login.entity_id));
     assert_eq!(hit.direct, Some(arrow.entity_id));
 

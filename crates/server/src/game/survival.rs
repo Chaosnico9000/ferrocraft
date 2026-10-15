@@ -333,31 +333,19 @@ impl Game {
     /// `ItemStack.hurtAndBreak`: `amount` more points of `minecraft:damage`
     /// for the item in a slot; at `max_damage` it breaks.
     pub(super) fn wear(&mut self, entity_id: i32, slot: usize, amount: i32) {
-        let data = &self.context.data;
-        let Ok(damage_type) = data.data_component_type("minecraft:damage") else {
-            return;
-        };
         let Some(player) = self.players.get(&entity_id) else {
             return;
         };
         if !mortal(player.game_mode()) {
             return;
         }
-        let Some(mut stack) = player.inventory.get(slot).cloned() else {
+        let Some(stack) = player.inventory.get(slot).cloned() else {
             return;
         };
-        let Some(max_damage) = data.item(stack.item).and_then(|i| i.max_damage) else {
+        let Some(worn) = self.worn(stack, amount) else {
             return;
         };
-        let current = stack
-            .patch
-            .added
-            .iter()
-            .find(|(t, _)| *t == damage_type)
-            .and_then(|(_, bytes)| VarInt::decode(&mut bytes.as_slice()).ok())
-            .map_or(0, |v| v.0);
-        let damage = current + amount;
-        let worn = if damage >= max_damage {
+        if worn.is_none() {
             // `EntityEvent` 47: the main hand's item breaks, with sound and
             // particles.
             let event = Encoded::new(&EntityEvent {
@@ -366,16 +354,33 @@ impl Game {
             });
             player.send(Outbound::Packet(Arc::new(event.clone())));
             self.broadcast_entity(entity_id, vec![event]);
-            None
-        } else {
-            let mut bytes = Vec::new();
-            VarInt(damage).encode(&mut bytes);
-            stack.patch.added.retain(|(t, _)| *t != damage_type);
-            stack.patch.added.push((damage_type, bytes));
-            Some(stack)
-        };
+        }
         self.update_inventory(entity_id, |inventory| inventory.set(slot, worn));
         self.send_slots(entity_id, &[slot]);
+    }
+
+    /// A stack `amount` points more damaged: `Some(None)` if it broke,
+    /// `None` if it takes no damage.
+    pub(super) fn worn(&self, mut stack: ItemStack, amount: i32) -> Option<Option<ItemStack>> {
+        let data = &self.context.data;
+        let damage_type = data.data_component_type("minecraft:damage").ok()?;
+        let max_damage = data.item(stack.item).and_then(|i| i.max_damage)?;
+        let current = stack
+            .patch
+            .added
+            .iter()
+            .find(|(t, _)| *t == damage_type)
+            .and_then(|(_, bytes)| VarInt::decode(&mut bytes.as_slice()).ok())
+            .map_or(0, |v| v.0);
+        let damage = current + amount;
+        if damage >= max_damage {
+            return Some(None);
+        }
+        let mut bytes = Vec::new();
+        VarInt(damage).encode(&mut bytes);
+        stack.patch.added.retain(|(t, _)| *t != damage_type);
+        stack.patch.added.push((damage_type, bytes));
+        Some(Some(stack))
     }
 
     /// The block at `pos` and the other half of a door or bed, with their
@@ -745,6 +750,11 @@ impl Game {
             f64::from(spawn.z) + 0.5,
         ];
         [player.yaw, player.pitch] = angle;
+        player.first_good = player.pos;
+        player.floating = false;
+        // A new body: not burning, full of air.
+        player.fire = 0;
+        player.air = crate::storage::MAX_AIR;
         player.tracker =
             super::tracker::Tracker::new(&player.pose(), super::player::PLAYER_UPDATE_INTERVAL);
         player.state = None;
@@ -1109,6 +1119,8 @@ impl Game {
                 continue;
             }
             player.invulnerable = player.invulnerable.saturating_sub(1);
+            self.tick_movement(entity_id);
+            self.tick_player_hazards(entity_id);
             self.tick_digging(entity_id);
             self.tick_using(entity_id);
             self.tick_food(entity_id);

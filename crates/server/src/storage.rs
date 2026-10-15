@@ -691,7 +691,7 @@ fn read_container(
 /// A block state as 26.3 writes it (`BlockState.CODEC`): the default state
 /// of a block is just its name, any other state `{id: "minecraft:oak_log",
 /// properties: {axis: "z"}}`.
-fn state_to_nbt(state: u32, data: &GameData) -> Nbt {
+pub fn state_to_nbt(state: u32, data: &GameData) -> Nbt {
     let Some((_, block)) = data.block_of(state) else {
         return Nbt::String("minecraft:air".into());
     };
@@ -716,7 +716,7 @@ fn state_to_nbt(state: u32, data: &GameData) -> Nbt {
 /// The state an NBT block state names, in the 26.3 form or the older
 /// `{Name, Properties}` one. Properties it does not mention keep their
 /// default, like vanilla's lenient codec.
-fn state_from_nbt(nbt: &Nbt, data: &GameData) -> Option<u32> {
+pub fn state_from_nbt(nbt: &Nbt, data: &GameData) -> Option<u32> {
     let (name, properties) = match nbt {
         Nbt::String(name) => (name, None),
         _ => match (nbt.get("id"), nbt.get("Name")) {
@@ -758,10 +758,15 @@ pub struct PlayerData {
     pub xp_progress: f32,
     pub xp_total: i32,
     pub xp_score: i32,
+    /// Ticks left burning (`Fire`) and breath left (`Air`).
+    pub fire: i32,
+    pub air: i32,
 }
 
 /// A player's full health.
 pub const MAX_HEALTH: f32 = 20.0;
+/// A full breath (`Entity.TOTAL_AIR_SUPPLY`).
+pub const MAX_AIR: i32 = 300;
 
 /// Inventory menu slots that vanilla saves under `equipment` instead.
 const EQUIPMENT_SLOTS: [(usize, &str); 5] = [
@@ -826,6 +831,14 @@ impl PlayerData {
             ("XpP".into(), Nbt::Float(self.xp_progress)),
             ("XpTotal".into(), Nbt::Int(self.xp_total)),
             ("Score".into(), Nbt::Int(self.xp_score)),
+            (
+                "Fire".into(),
+                Nbt::Short(self.fire.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16),
+            ),
+            (
+                "Air".into(),
+                Nbt::Short(self.air.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16),
+            ),
         ])
     }
 
@@ -905,6 +918,14 @@ impl PlayerData {
             },
             xp_total: int_or_zero(nbt, "XpTotal").max(0),
             xp_score: int_or_zero(nbt, "Score"),
+            fire: match nbt.get("Fire") {
+                Some(Nbt::Short(fire)) => i32::from(*fire),
+                _ => 0,
+            },
+            air: match nbt.get("Air") {
+                Some(Nbt::Short(air)) => i32::from(*air),
+                _ => MAX_AIR,
+            },
         }
     }
 }
@@ -1241,6 +1262,8 @@ mod tests {
             xp_progress: 0.25,
             xp_total: 91,
             xp_score: 91,
+            fire: 37,
+            air: 120,
             inventory: vec![
                 (36, stack(1, 64)),
                 (20, stack(2, 3)),

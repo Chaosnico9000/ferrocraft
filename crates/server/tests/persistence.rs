@@ -98,18 +98,33 @@ async fn the_inventory_comes_back() {
     let (server, addr) = start_server(config.clone(), Timing::default()).await;
     let (mut alex, _) = join(addr, "Alex", 2).await;
     hold(&mut alex, STONE_ITEM).await;
+    // The answer to `/list` shows the server has read the slot: leaving at
+    // once can cut the connection before it does.
+    alex.send(&ChatCommand {
+        command: "list".into(),
+    })
+    .await;
+    alex.read_until::<SystemChat>().await;
     drop(alex);
-    // Leaving saves the player; a second login reads it back.
-    let (mut alex, inventory) = loop {
-        let (mut client, _) = Client::login(addr, "Alex").await;
-        client.configure(2).await;
-        let inventory: ContainerSetContent = client.read_until().await;
-        if inventory.items.0[36].0.is_some() {
-            break (client, inventory);
+    // Leaving saves the player; a second login reads it back. A login
+    // before the save would find nothing, and leaving again would save
+    // that, so wait for the file.
+    let players = world.0.join("players/data");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let saved = || {
+            std::fs::read_dir(&players).is_ok_and(|mut d| {
+                d.any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "dat")))
+            })
+        };
+        while !saved() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        // The first session may not have been saved yet.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    };
+    })
+    .await
+    .expect("the player is saved");
+    let (mut alex, _) = Client::login(addr, "Alex").await;
+    alex.configure(2).await;
+    let inventory: ContainerSetContent = alex.read_until().await;
     let item = inventory.items.0[36].0.as_ref().unwrap();
     assert_eq!((item.item, item.count), (STONE_ITEM, 64));
     assert_eq!(alex.read::<SetHeldSlot>().await.slot, 0);

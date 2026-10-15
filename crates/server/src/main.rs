@@ -32,10 +32,43 @@ async fn main() -> anyhow::Result<()> {
         result = Arc::clone(&server).serve(listener) => return result,
         _ = tokio::signal::ctrl_c() => {}
         _ = terminate.recv() => {}
+        _ = console(&server) => {}
     }
     info!("shutting down");
     server.shutdown().await;
     // Give the connections a moment to deliver their disconnect message.
     tokio::time::sleep(Duration::from_millis(200)).await;
     Ok(())
+}
+
+/// The server console: each line of standard input is a command, run as
+/// an operator; `stop` ends the server. Without input (`< /dev/null`) the
+/// server just goes on. Standard input is read on a thread of its own: a
+/// blocking read in tokio's pool would keep the runtime, and so the
+/// process, from ending.
+async fn console(server: &Server) {
+    let (lines, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::Builder::new()
+        .name("console".into())
+        .spawn(move || {
+            for line in std::io::stdin().lines() {
+                let Ok(line) = line else { break };
+                if lines.send(line).is_err() {
+                    break;
+                }
+            }
+        })
+        .expect("spawning the console thread");
+    while let Some(line) = incoming.recv().await {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if matches!(line.trim_start_matches('/'), "stop") {
+            info!("Stopping the server");
+            return;
+        }
+        server.console_line(line);
+    }
+    std::future::pending::<()>().await;
 }

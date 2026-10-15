@@ -58,7 +58,7 @@ impl Fluid {
         }
     }
 
-    fn bucket(self) -> &'static str {
+    pub fn bucket(self) -> &'static str {
         match self {
             Fluid::Water => "minecraft:water_bucket",
             Fluid::Lava => "minecraft:lava_bucket",
@@ -163,7 +163,7 @@ impl Game {
     }
 
     /// `FluidState.getHeight`: full if the same fluid is above.
-    fn fluid_height(&self, fluid: FluidState, pos: BlockPos) -> f32 {
+    pub(super) fn fluid_height(&self, fluid: FluidState, pos: BlockPos) -> f32 {
         if fluid.fluid.is_some() && self.fluid_at(super::blocks::above(pos)).fluid == fluid.fluid {
             1.0
         } else {
@@ -293,8 +293,8 @@ impl Game {
             }
         }
         let converts = match fluid {
-            Fluid::Water => self.rules.water_source_conversion,
-            Fluid::Lava => self.rules.lava_source_conversion,
+            Fluid::Water => self.rules.flag("water_source_conversion"),
+            Fluid::Lava => self.rules.flag("lava_source_conversion"),
         };
         if sources >= 2 && converts {
             let below_state = world.block(below(pos));
@@ -755,7 +755,7 @@ impl Game {
 
     /// `BucketPickup.pickupBlock`: a source becomes air, a waterlogged
     /// block dry.
-    fn pick_up_fluid(&mut self, pos: BlockPos, state: u32) -> Option<Fluid> {
+    pub(super) fn pick_up_fluid(&mut self, pos: BlockPos, state: u32) -> Option<Fluid> {
         let fluid = self.fluid_state(state);
         if !fluid.source {
             return None;
@@ -774,7 +774,7 @@ impl Game {
 
     /// `BucketItem.emptyContents`: pours a source out at `pos`, or at
     /// `fallback` if `pos` does not take it.
-    fn empty_bucket(
+    pub(super) fn empty_bucket(
         &mut self,
         fluid: Fluid,
         pos: BlockPos,

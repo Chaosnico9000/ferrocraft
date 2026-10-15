@@ -137,6 +137,22 @@ pub async fn walk(client: &mut Client, pos: [f64; 3], rot: Option<[f32; 2]>) {
     client.send_raw(id, &body).await;
 }
 
+/// Walks from `from` to `to` in steps of at most eight blocks, one a
+/// tick, as a client does; the server refuses bigger jumps.
+pub async fn walk_steps(client: &mut Client, from: [f64; 3], to: [f64; 3]) {
+    let distance = (0..3)
+        .map(|i| (to[i] - from[i]).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let steps = (distance / 8.0).ceil().max(1.0) as usize;
+    for step in 1..=steps {
+        let t = step as f64 / steps as f64;
+        let at = std::array::from_fn(|i| from[i] + (to[i] - from[i]) * t);
+        walk(client, at, None).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    }
+}
+
 /// Reads until a packet of type `P` matches `wanted`.
 pub async fn read_matching<P: Packet>(client: &mut Client, wanted: impl Fn(&P) -> bool) -> P {
     loop {

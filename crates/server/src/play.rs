@@ -128,6 +128,9 @@ pub async fn handle(
     let (ender, health) = saved
         .as_ref()
         .map_or((Vec::new(), MAX_HEALTH), |s| (s.ender.clone(), s.health));
+    let (fire, air) = saved
+        .as_ref()
+        .map_or((0, crate::storage::MAX_AIR), |s| (s.fire, s.air));
     let experience = saved
         .as_ref()
         .map_or_else(game::Experience::default, |s| game::Experience {
@@ -166,6 +169,8 @@ pub async fn handle(
         ender,
         health,
         experience,
+        fire,
+        air,
         skin_parts: information.as_ref().map_or(0, |i| i.model_customisation),
         main_hand: information.as_ref().map_or(1, |i| i.main_hand),
         outbound,

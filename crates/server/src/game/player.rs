@@ -85,6 +85,19 @@ pub struct Player {
     pub xp_delay: u32,
     /// Game tick of the last fanfare for a new level.
     pub last_level_up: u64,
+    /// Ticks left burning (`remainingFireTicks`); below zero, ticks of
+    /// fire immunity left.
+    pub fire: i32,
+    /// Breath left (`airSupply`), 300 when full.
+    pub air: i32,
+    /// Where the player was when the tick began (`firstGood`), and how
+    /// many moves came since.
+    pub first_good: [f64; 3],
+    pub move_packets: u32,
+    /// Hanging in the air without being allowed to fly, and for how many
+    /// ticks (`clientIsFloating`, `aboveGroundTickCount`).
+    pub floating: bool,
+    pub floating_ticks: u32,
 }
 
 /// A player's experience: the level, the way to the next as a fraction,
@@ -187,6 +200,8 @@ impl Player {
             xp_progress: self.experience.progress,
             xp_total: self.experience.total,
             xp_score: self.experience.score,
+            fire: self.fire,
+            air: self.air,
         }
     }
 
@@ -229,7 +244,7 @@ impl Player {
     }
 
     fn shared_flags(&self) -> u8 {
-        let mut flags = 0;
+        let mut flags = u8::from(self.fire > 0);
         if self.sneaking {
             flags |= 0x02;
         }
@@ -257,6 +272,9 @@ impl Player {
                 data_index::LIVING_ENTITY_FLAGS,
                 EntityData::Byte(self.living_flags()),
             );
+        }
+        if self.air != crate::storage::MAX_AIR {
+            push(data_index::AIR_SUPPLY, EntityData::Int(self.air));
         }
         push(data_index::HEALTH, EntityData::Float(self.health));
         if self.main_hand != 1 {
@@ -291,6 +309,10 @@ impl Player {
             EntityDataValue {
                 index: data_index::LIVING_ENTITY_FLAGS,
                 value: EntityData::Byte(self.living_flags()),
+            },
+            EntityDataValue {
+                index: data_index::AIR_SUPPLY,
+                value: EntityData::Int(self.air),
             },
             EntityDataValue {
                 index: data_index::HEALTH,

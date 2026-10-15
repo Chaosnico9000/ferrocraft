@@ -113,10 +113,17 @@ async fn falling_hurts_and_dying_respawns() {
     let health = read_matching(&mut alex, |h: &SetHealth| h.health < 20.0).await;
     assert_eq!(health.health, 13.0);
 
-    // Thirty blocks are too many.
-    fall_to(&mut alex, [0.5, -30.0, 0.5], false).await;
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    fall_to(&mut alex, [0.5, -60.0, 0.5], true).await;
+    // Thirty blocks are too many. Up and down in steps of six a tick, as
+    // the server turns back bigger jumps.
+    for y in (-54..=-30).step_by(6) {
+        fall_to(&mut alex, [0.5, f64::from(y), 0.5], false).await;
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for y in (-60..=-36).rev().step_by(6) {
+        fall_to(&mut alex, [0.5, f64::from(y), 0.5], y == -60).await;
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
     let death: PlayerCombatKill = alex.read_until().await;
     assert_eq!(death.player_id, entity_id);
     read_matching(&mut alex, |e: &EntityEvent| e.event == 3).await;

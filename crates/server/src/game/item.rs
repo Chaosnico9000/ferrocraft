@@ -42,6 +42,8 @@ pub struct ItemEntity {
     on_ground: bool,
     /// Ticks until it can be picked up.
     pub pickup_delay: i32,
+    /// Burns away at zero (`ItemEntity.health`).
+    pub health: f32,
     age: i32,
     tick_count: u32,
     tracker: Tracker,
@@ -113,7 +115,7 @@ impl ItemEntity {
             ),
             ("OnGround".into(), Nbt::Byte(i8::from(self.on_ground))),
             ("UUID".into(), uuid_to_nbt(self.uuid)),
-            ("Health".into(), Nbt::Short(5)),
+            ("Health".into(), Nbt::Short(self.health.ceil() as i16)),
             (
                 "Age".into(),
                 Nbt::Short(self.age.clamp(-32768, 32767) as i16),
@@ -173,6 +175,7 @@ impl Game {
             velocity,
             on_ground: false,
             pickup_delay,
+            health: 5.0,
             age: 0,
             tick_count: 0,
             tracker: Tracker::new(&pose, ITEM_UPDATE_INTERVAL),
@@ -266,6 +269,10 @@ impl Game {
             velocity,
             on_ground: matches!(nbt.get("OnGround"), Some(Nbt::Byte(1))),
             pickup_delay: short("PickupDelay"),
+            health: match nbt.get("Health") {
+                Some(Nbt::Short(health)) => f32::from(*health).clamp(1.0, 5.0),
+                _ => 5.0,
+            },
             age: short("Age"),
             tick_count: 0,
             tracker: Tracker::new(&pose, ITEM_UPDATE_INTERVAL),
@@ -277,6 +284,25 @@ impl Game {
         let state = item.state(self.item_type);
         self.items.insert(entity_id, item);
         self.broadcast(None, &Outbound::EntityAdded(state));
+    }
+
+    /// What is left of an item entity's stack after part was taken.
+    pub(super) fn set_item_stack(&mut self, entity_id: i32, stack: ItemStack) {
+        if let Some(item) = self.items.get_mut(&entity_id) {
+            item.stack = stack;
+            item.stack_dirty = true;
+            item.state = None;
+        }
+    }
+
+    /// Moves an item entity, as a piston does.
+    pub(super) fn shift_item(&mut self, entity_id: i32, by: [f64; 3]) {
+        if let Some(item) = self.items.get_mut(&entity_id) {
+            for (p, d) in item.pos.iter_mut().zip(by) {
+                *p += d;
+            }
+            item.needs_sync = true;
+        }
     }
 
     pub(super) fn remove_item(&mut self, entity_id: i32) {
@@ -292,6 +318,7 @@ impl Game {
         for entity_id in ids {
             self.tick_item(entity_id);
         }
+        self.tick_item_hazards();
     }
 
     fn tick_item(&mut self, entity_id: i32) {

@@ -10,16 +10,20 @@ use std::sync::atomic::Ordering;
 use ferrocraft_protocol::codec::BlockPos;
 use ferrocraft_protocol::packets::play::{
     EntityData, EntityDataValue, EntityDataValues, GameEvent, GameMode, ItemStack, LpVec3,
-    SOUND_SOURCE_NEUTRAL, SetEntityData, SetEntityMotion, TakeItemEntity, text,
+    SOUND_SOURCE_NEUTRAL, SetEntityData, SetEntityMotion, TakeItemEntity, data_index, text,
 };
 use rand::Rng;
 use uuid::Uuid;
 
+use ferrocraft_protocol::Nbt;
+
+use super::mob::save::{doubles, read_doubles, uuid_from_ints, uuid_from_nbt, uuid_to_nbt};
 use super::physics;
 use super::survival::Hit;
 use super::tracker::{Pose, Tracker};
 use super::{Encoded, EntityState, Game, Outbound};
 use crate::data::Aabb;
+use crate::storage::{state_from_nbt, state_to_nbt};
 
 /// `AbstractArrow.ID_FLAGS` (0x01 critical) and `IN_GROUND`, with
 /// `PIERCE_LEVEL` (9) between them.
@@ -76,6 +80,8 @@ pub struct Arrow {
     pickup: Pickup,
     /// Where it sticks, and the block it sticks in.
     stuck: Option<(BlockPos, u32)>,
+    /// Ticks left burning, after flying through fire or lava.
+    fire: i32,
     shake: u32,
     life: u32,
     tracker: Tracker,
@@ -125,6 +131,10 @@ impl Arrow {
 
     fn data(&self) -> Vec<EntityDataValue> {
         vec![
+            EntityDataValue {
+                index: data_index::SHARED_FLAGS,
+                value: EntityData::Byte(u8::from(self.fire > 0)),
+            },
             EntityDataValue {
                 index: FLAGS,
                 value: EntityData::Byte(u8::from(self.crit)),
@@ -206,6 +216,7 @@ impl Game {
             crit,
             pickup,
             stuck: None,
+            fire: 0,
             shake: 0,
             life: 0,
             tracker: Tracker::new(
@@ -224,6 +235,171 @@ impl Game {
         };
         arrow.face_velocity();
         arrow.tracker = Tracker::new(&arrow.pose(), UPDATE_INTERVAL);
+        let state = arrow.state(self.arrow_type());
+        self.arrows.insert(entity_id, arrow);
+        self.broadcast(None, &Outbound::EntityAdded(state));
+    }
+
+    /// `AbstractArrow.addAdditionalSaveData` after the entity's and the
+    /// projectile's own.
+    pub(super) fn arrow_nbt(&self) -> Vec<([f64; 3], Nbt)> {
+        let data = &self.context.data;
+        self.arrows
+            .values()
+            .map(|a| {
+                let pickup = match a.pickup {
+                    Pickup::Disallowed => 0,
+                    Pickup::Allowed => 1,
+                    Pickup::CreativeOnly => 2,
+                };
+                let mut entries = vec![
+                    ("id".to_owned(), Nbt::String("minecraft:arrow".into())),
+                    ("Pos".into(), doubles(&a.pos)),
+                    ("Motion".into(), doubles(&a.velocity)),
+                    (
+                        "Rotation".into(),
+                        Nbt::List(vec![Nbt::Float(a.yaw), Nbt::Float(a.pitch)]),
+                    ),
+                    ("OnGround".into(), Nbt::Byte(0)),
+                    ("UUID".into(), uuid_to_nbt(a.uuid)),
+                    ("Fire".into(), Nbt::Short(a.fire.min(32767) as i16)),
+                    ("HasBeenShot".into(), Nbt::Byte(1)),
+                    ("LeftOwner".into(), Nbt::Byte(1)),
+                    ("life".into(), Nbt::Short(a.life.min(32767) as i16)),
+                    ("shake".into(), Nbt::Byte(a.shake.min(127) as i8)),
+                    ("inGround".into(), Nbt::Byte(i8::from(a.stuck.is_some()))),
+                    ("pickup".into(), Nbt::Byte(pickup)),
+                    ("damage".into(), Nbt::Double(a.base_damage)),
+                    ("crit".into(), Nbt::Byte(i8::from(a.crit))),
+                    ("PierceLevel".into(), Nbt::Byte(0)),
+                    (
+                        "SoundEvent".into(),
+                        Nbt::String("minecraft:entity.arrow.hit".into()),
+                    ),
+                    (
+                        "item".into(),
+                        Nbt::Compound(vec![
+                            ("id".into(), Nbt::String("minecraft:arrow".into())),
+                            ("count".into(), Nbt::Int(1)),
+                        ]),
+                    ),
+                ];
+                if let Some((_, state)) = a.stuck {
+                    entries.push(("inBlockState".into(), state_to_nbt(state, data)));
+                }
+                if let Some(owner) = a.owner.and_then(|o| self.uuid_of(o)) {
+                    entries.push(("Owner".into(), uuid_to_nbt(owner)));
+                }
+                (a.pos, Nbt::Compound(entries))
+            })
+            .collect()
+    }
+
+    /// An arrow from the entity store: flying, or stuck in the block it is
+    /// at (`shouldFall` looks 0.06 around it).
+    pub(super) fn revive_arrow(&mut self, entity_id: i32, nbt: &Nbt) {
+        let data = Arc::clone(&self.context.data);
+        let world = Arc::clone(&self.context.world);
+        let Some(pos) = read_doubles(nbt, "Pos") else {
+            return;
+        };
+        let velocity = read_doubles(nbt, "Motion").unwrap_or_default();
+        let byte = |key| match nbt.get(key) {
+            Some(Nbt::Byte(b)) => i32::from(*b),
+            _ => 0,
+        };
+        let pickup = match byte("pickup") {
+            1 => Pickup::Allowed,
+            2 => Pickup::CreativeOnly,
+            _ => Pickup::Disallowed,
+        };
+        let stuck = if byte("inGround") != 0 {
+            let near = [
+                pos[0] - 0.06,
+                pos[1] - 0.06,
+                pos[2] - 0.06,
+                pos[0] + 0.06,
+                pos[1] + 0.06,
+                pos[2] + 0.06,
+            ];
+            let saved = nbt
+                .get("inBlockState")
+                .and_then(|s| state_from_nbt(s, &data));
+            let mut found = None;
+            'search: for x in near[0].floor() as i32..=near[3].floor() as i32 {
+                for y in near[1].floor() as i32..=near[4].floor() as i32 {
+                    for z in near[2].floor() as i32..=near[5].floor() as i32 {
+                        let block = BlockPos { x, y, z };
+                        let state = world.block(block);
+                        let touches = data.collision_shape(state).iter().any(|b| {
+                            let b = [
+                                b[0] + f64::from(x),
+                                b[1] + f64::from(y),
+                                b[2] + f64::from(z),
+                                b[3] + f64::from(x),
+                                b[4] + f64::from(y),
+                                b[5] + f64::from(z),
+                            ];
+                            (0..3).all(|i| b[i] < near[i + 3] && b[i + 3] > near[i])
+                        });
+                        if touches && saved.is_none_or(|s| s == state) {
+                            found = Some((block, state));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            found
+        } else {
+            None
+        };
+        let rotation = match nbt.get("Rotation") {
+            Some(Nbt::List(r)) => match r[..] {
+                [Nbt::Float(yaw), Nbt::Float(pitch)] => [yaw, pitch],
+                _ => [0.0, 0.0],
+            },
+            _ => [0.0, 0.0],
+        };
+        let owner = nbt
+            .get("Owner")
+            .and_then(uuid_from_ints)
+            .and_then(|u| self.entity_of(u));
+        let pose = Pose {
+            pos,
+            yaw: rotation[0],
+            pitch: rotation[1],
+            head_yaw: 0.0,
+            on_ground: false,
+        };
+        let mut arrow = Arrow {
+            entity_id,
+            uuid: uuid_from_nbt(nbt).unwrap_or_else(Uuid::new_v4),
+            owner,
+            pos,
+            velocity,
+            yaw: rotation[0],
+            pitch: rotation[1],
+            base_damage: match nbt.get("damage") {
+                Some(Nbt::Double(d)) => *d,
+                _ => 2.0,
+            },
+            crit: byte("crit") != 0,
+            pickup,
+            stuck,
+            fire: match nbt.get("Fire") {
+                Some(Nbt::Short(f)) => i32::from(*f).max(0),
+                _ => 0,
+            },
+            shake: byte("shake").max(0) as u32,
+            life: match nbt.get("life") {
+                Some(Nbt::Short(l)) => (*l).max(0) as u32,
+                _ => 0,
+            },
+            tracker: Tracker::new(&pose, UPDATE_INTERVAL),
+            sent_velocity: velocity,
+            data_dirty: false,
+            state: None,
+        };
         let state = arrow.state(self.arrow_type());
         self.arrows.insert(entity_id, arrow);
         self.broadcast(None, &Outbound::EntityAdded(state));
@@ -325,6 +501,20 @@ impl Game {
                     hit.at[2] - back[2],
                 ];
                 arrow.velocity = [0.0; 3];
+                let (burning, shooter) = (arrow.fire > 0, arrow.owner);
+                // `TntBlock.onProjectileHit`: a burning arrow lights it.
+                if burning && self.kind(world.block(hit.block)) == super::blocks::Kind::Tnt {
+                    let may = shooter.is_none_or(|o| {
+                        self.players.contains_key(&o) || self.rules.flag("mob_griefing")
+                    });
+                    if may {
+                        self.remove_block_keeping_fluid(hit.block);
+                        self.prime_tnt(hit.block, shooter, super::tnt::DEFAULT_FUSE);
+                    }
+                }
+                let Some(arrow) = self.arrows.get_mut(&entity_id) else {
+                    return;
+                };
                 arrow.stuck = Some((hit.block, world.block(hit.block)));
                 arrow.shake = SHAKE;
                 arrow.crit = false;
@@ -342,7 +532,28 @@ impl Game {
                 );
             }
             None => {
+                let start = arrow.bounds();
                 arrow.pos = to;
+                let burning = arrow.fire;
+                // The blocks along the way (`checkInsideBlocks` over the
+                // movement), start and end.
+                let end = arrow.bounds();
+                let bounds: Aabb = std::array::from_fn(|i| {
+                    if i < 3 {
+                        start[i].min(end[i])
+                    } else {
+                        start[i].max(end[i])
+                    }
+                });
+                let pos = arrow.pos;
+                let fire = self.burning_thing(bounds, pos, burning);
+                let Some(arrow) = self.arrows.get_mut(&entity_id) else {
+                    return;
+                };
+                if (fire > 0) != (burning > 0) {
+                    arrow.data_dirty = true;
+                }
+                arrow.fire = fire;
                 let in_water = data.physics(world.block(BlockPos {
                     x: to[0].floor() as i32,
                     y: to[1].floor() as i32,
@@ -380,7 +591,7 @@ impl Game {
             damage += rand::rng().random_range(0..damage / 2 + 2);
         }
         let damage = damage as f32;
-        let (owner, at) = (arrow.owner, arrow.pos);
+        let (owner, at, burning) = (arrow.owner, arrow.pos, arrow.fire > 0);
         let hurt = if self.mobs.contains_key(&victim) {
             self.hurt_mob_by(
                 victim,
@@ -412,6 +623,14 @@ impl Game {
         } else {
             false
         };
+        if hurt && burning {
+            // `onHitEntity`: a burning arrow sets what it hits alight.
+            if self.mobs.contains_key(&victim) {
+                self.ignite_mob(victim, 5);
+            } else {
+                self.ignite_player(victim, 5);
+            }
+        }
         if hurt {
             // The shooter hears it when a player is hit.
             if self.players.contains_key(&victim)

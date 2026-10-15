@@ -199,13 +199,57 @@ impl Game {
         if !matches!(mode, GameMode::Creative | GameMode::Survival) {
             return self.finish_block_action(entity_id, click.sequence, &refresh);
         }
-        if self.light_tnt(entity_id, click) || self.use_item_on_block(entity_id, click) {
+        if self.light_tnt(entity_id, click)
+            || self.use_item_on_block(entity_id, click)
+            || self.use_lighter(entity_id, click, face)
+        {
             return self.finish_block_action(entity_id, click.sequence, &refresh);
         }
         let changed = self.place(entity_id, click, face);
         let mut refresh = refresh.to_vec();
         refresh.extend(changed);
         self.finish_block_action(entity_id, click.sequence, &refresh);
+    }
+
+    /// Flint and steel or a fire charge on a block: fire, or a lit
+    /// campfire or candle.
+    fn use_lighter(&mut self, entity_id: i32, click: &UseItemOn, face: Direction) -> bool {
+        let Some(player) = self.players.get(&entity_id) else {
+            return false;
+        };
+        let slot = if click.hand == 1 {
+            inventory::OFF_HAND
+        } else {
+            player.inventory.selected_slot()
+        };
+        let Some(stack) = player.inventory.get(slot).cloned() else {
+            return false;
+        };
+        let creative = player.game_mode() == GameMode::Creative;
+        let name = self
+            .context
+            .data
+            .item(stack.item)
+            .map_or("", |i| i.name.as_str());
+        let charge = match name {
+            "minecraft:flint_and_steel" => false,
+            "minecraft:fire_charge" => true,
+            _ => return false,
+        };
+        if !self.strike_fire(click.pos, face, charge) {
+            return false;
+        }
+        self.swing(entity_id);
+        if !creative {
+            if charge {
+                let left = self.after_strike(stack, true);
+                self.update_inventory(entity_id, |inventory| inventory.set(slot, left));
+                self.send_slots(entity_id, &[slot]);
+            } else {
+                self.wear(entity_id, slot, 1);
+            }
+        }
+        true
     }
 
     /// Places the block in hand; returns the positions it set.
@@ -244,8 +288,8 @@ impl Game {
             blocks[0].1 = state;
             partner = joined;
         }
-        let yaw = player.yaw;
-        blocks[0].1 = self.placement_state(target, blocks[0].1, face, yaw);
+        let (yaw, pitch) = (player.yaw, player.pitch);
+        blocks[0].1 = self.placement_state(target, blocks[0].1, face, yaw, pitch);
         let Some(player) = self.players.get(&entity_id) else {
             return Vec::new();
         };
@@ -274,8 +318,16 @@ impl Game {
         if let Some((pos, state)) = partner {
             self.set_block(pos, state);
         }
-        if self.kind(blocks[0].1) == Kind::Repeater {
-            self.repeater_placed(blocks[0].0, blocks[0].1);
+        match self.kind(blocks[0].1) {
+            Kind::Repeater | Kind::Comparator => self.repeater_placed(blocks[0].0, blocks[0].1),
+            // `PistonBaseBlock.setPlacedBy`.
+            Kind::Piston => {
+                let state = self.context.world.block(blocks[0].0);
+                if self.kind(state) == Kind::Piston {
+                    self.piston_check(blocks[0].0, state);
+                }
+            }
+            _ => {}
         }
         self.swing(entity_id);
         if survival {
@@ -364,7 +416,17 @@ impl Game {
                 self.cycle_repeater(pos, state);
                 return true;
             }
+            Kind::Comparator => {
+                self.cycle_comparator(pos, state);
+                return true;
+            }
             Kind::Wire => return self.toggle_wire(pos, state),
+            // `MovingPistonBlock.useWithoutItem`: a leftover without its
+            // block entity goes.
+            Kind::MovingPiston if self.moving_at(pos).is_none() => {
+                self.remove_block_keeping_fluid(pos);
+                return true;
+            }
             _ => {}
         }
         false
@@ -373,9 +435,36 @@ impl Game {
     /// `getStateForPlacement` of the blocks whose placed state depends on
     /// their surroundings: wall torches on walls, wires connected, leaves
     /// that stay, lamps and doors powered, concrete powder in water set.
-    fn placement_state(&self, pos: BlockPos, state: u32, face: Direction, yaw: f32) -> u32 {
+    fn placement_state(
+        &self,
+        pos: BlockPos,
+        state: u32,
+        face: Direction,
+        yaw: f32,
+        pitch: f32,
+    ) -> u32 {
         let data = &self.context.data;
         match self.kind(state) {
+            // `getNearestLookingDirection().getOpposite()`: they face the
+            // player; an observer looks away.
+            Kind::Piston | Kind::Dispenser | Kind::Dropper => {
+                let facing = placement::opposite(placement::nearest_looking(yaw, pitch));
+                self.with(state, "facing", facing.name())
+            }
+            Kind::Observer => {
+                let facing = placement::nearest_looking(yaw, pitch);
+                self.with(state, "facing", facing.name())
+            }
+            // `HopperBlock`: into the clicked block, down from above or
+            // below.
+            Kind::Hopper => {
+                let facing = match placement::opposite(face) {
+                    Direction::Up | Direction::Down => Direction::Down,
+                    side => side,
+                };
+                self.with(state, "facing", facing.name())
+            }
+            Kind::Fire => self.fire_state_at(pos),
             Kind::Torch | Kind::RedstoneTorch => {
                 let name = data
                     .block_of(state)
@@ -632,7 +721,7 @@ impl Game {
                 return;
             }
             entity.set_sign_text(update.side == 1, &lines);
-            tag = entity.update_tag();
+            tag = entity.update_tag(&self.context.data);
             kind = Some(entity.kind.clone());
         });
         let (Some(tag), Some(kind)) = (tag, kind) else {
@@ -768,8 +857,27 @@ impl Game {
                 chest = Some((towards.offset(at), block.first, block.state_count()));
             }
         }
-        for &(at, _) in removed.iter().rev() {
-            self.set_block(at, self.air);
+        // `playerWillDestroy`: fire hisses out; a piston head broken in
+        // creative takes its base without drops.
+        if let Some(breaker) = breaker {
+            let state = removed[0].1;
+            match self.kind(state) {
+                Kind::Fire => self.level_event(1009, pos, 0),
+                Kind::PistonHead
+                    if self
+                        .players
+                        .get(&breaker)
+                        .is_some_and(|p| p.game_mode() == GameMode::Creative) =>
+                {
+                    self.head_broken_by_creative(pos, state)
+                }
+                _ => {}
+            }
+        }
+        for &(at, state) in removed.iter().rev() {
+            // `Level.removeBlock`: water in the block stays.
+            let left = self.fluid_state(state).legacy_block(self);
+            self.set_block(at, left);
         }
         if let Some((other, first, count)) = chest {
             let state = self.context.world.block(other);
@@ -780,7 +888,7 @@ impl Game {
                 self.set_block(other, single);
             }
         }
-        if effects {
+        if effects && self.kind(removed[0].1) != Kind::Fire {
             self.break_effect(breaker, pos, removed[0].1);
         }
         for (at, stack) in contents {
@@ -833,6 +941,8 @@ impl Game {
             return;
         };
         player.pos = pos;
+        player.first_good = pos;
+        player.floating = false;
         player.fall_distance = 0.0;
         player.send(Outbound::Teleport {
             pos,

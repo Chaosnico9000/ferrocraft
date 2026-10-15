@@ -181,6 +181,7 @@ impl SavedTick {
 /// Block entities that tick.
 fn ticks(kind: &str) -> bool {
     crate::crafting::Cooker::of(kind).is_some()
+        || matches!(kind, "minecraft:piston" | "minecraft:hopper")
 }
 
 impl World {
@@ -683,7 +684,7 @@ impl World {
                     packed_xz: ((pos.x & 15) << 4 | (pos.z & 15)) as u8,
                     y: pos.y as i16,
                     kind: self.data.block_entity_type(&entity.kind).ok()?,
-                    tag: entity.update_tag(),
+                    tag: entity.update_tag(&self.data),
                 })
             })
             .collect();

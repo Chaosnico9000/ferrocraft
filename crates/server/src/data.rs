@@ -21,6 +21,8 @@ const RECIPES: &str = include_str!("../../../data/26.3/recipes.json");
 const LOOT: &str = include_str!("../../../data/26.3/loot_tables.json");
 const ENTITIES: &str = include_str!("../../../data/26.3/entities.json");
 const FEATURES: &str = include_str!("../../../data/26.3/features.json");
+/// The English texts of the server jar, for the console.
+const LANGUAGE: &str = include_str!("../../../data/26.3/en_us.json");
 
 #[derive(Deserialize)]
 struct SyncedRegistry {
@@ -59,7 +61,7 @@ pub struct StatePhysics {
     /// Monsters may spawn on top (`BlockState.isValidSpawn` for a zombie).
     pub spawnable: bool,
     /// The bits of [`flags`].
-    pub flags: u16,
+    pub flags: u32,
     /// Index into [`GameData::collision_shape`]'s table: the outline that
     /// aiming hits (`getShape`).
     pub outline: u16,
@@ -69,20 +71,36 @@ pub struct StatePhysics {
 /// writes it.
 pub mod flags {
     /// `BlockState.isSolid`.
-    pub const SOLID: u16 = 1;
+    pub const SOLID: u32 = 1;
     /// `isRandomlyTicking`.
-    pub const RANDOM_TICKS: u16 = 2;
+    pub const RANDOM_TICKS: u32 = 2;
     /// `isRedstoneConductor`.
-    pub const CONDUCTOR: u16 = 4;
+    pub const CONDUCTOR: u32 = 4;
     /// `canBeReplaced`.
-    pub const REPLACEABLE: u16 = 8;
+    pub const REPLACEABLE: u32 = 8;
     /// `isFaceSturdy` for the face in 3D data value order (down, up,
     /// north, south, west, east): `STURDY << direction`.
-    pub const STURDY: u16 = 16;
+    pub const STURDY: u32 = 16;
     /// The top holds something in its centre (`SupportType.CENTER`).
-    pub const CENTER_TOP: u16 = 1024;
+    pub const CENTER_TOP: u32 = 1024;
     /// `isSignalSource`.
-    pub const SIGNAL_SOURCE: u16 = 2048;
+    pub const SIGNAL_SOURCE: u32 = 2048;
+    /// `PushReaction` (see [`push`](super::push)) in three bits from here.
+    pub const PUSH_SHIFT: u32 = 12;
+    /// `hasAnalogOutputSignal`: a comparator reads it.
+    pub const ANALOG: u32 = 1 << 15;
+    /// `ignitedByLava`.
+    pub const IGNITED_BY_LAVA: u32 = 1 << 16;
+}
+
+/// How a piston moves a block (`PushReaction`).
+pub mod push {
+    pub const PUSH_PULL: u32 = 0;
+    pub const PUSH_ONLY: u32 = 1;
+    /// It breaks.
+    pub const POPPED: u32 = 2;
+    pub const IMMOVABLE: u32 = 3;
+    pub const IGNORE: u32 = 4;
 }
 
 type RawPhysics = (
@@ -98,7 +116,7 @@ type RawPhysics = (
     u16,
     u8,
     bool,
-    u16,
+    u32,
     u16,
 );
 
@@ -136,8 +154,13 @@ impl From<RawPhysics> for StatePhysics {
 }
 
 impl StatePhysics {
-    pub fn has(&self, flag: u16) -> bool {
+    pub fn has(&self, flag: u32) -> bool {
         self.flags & flag != 0
+    }
+
+    /// How pistons move it, one of [`push`].
+    pub fn push_reaction(&self) -> u32 {
+        (self.flags >> flags::PUSH_SHIFT) & 7
     }
 
     /// Whether the face towards `direction` (3D data value) is sturdy.
@@ -168,6 +191,10 @@ pub struct Block {
     /// `["CarrotBlock", "CropBlock", "VegetationBlock"]`.
     #[serde(default)]
     pub classes: Vec<String>,
+    /// How readily it catches fire and burns away (`FireBlock`'s ignite and
+    /// burn odds).
+    #[serde(default)]
+    pub fire: Option<[i32; 2]>,
     /// One entry for all states, or one per state.
     states: Vec<StatePhysics>,
 }
@@ -389,6 +416,8 @@ pub struct GameData {
     pub features: Features,
     /// Per block tag, a bit per block id, for quick lookups.
     block_tags: HashMap<String, Vec<u64>>,
+    /// Translation keys and their English text (`en_us.json`).
+    pub language: HashMap<String, String>,
 }
 
 impl GameData {
@@ -472,6 +501,7 @@ impl GameData {
             entities: serde_json::from_str(ENTITIES).context("parsing entities.json")?,
             features: serde_json::from_str(FEATURES).context("parsing features.json")?,
             block_tags: HashMap::new(),
+            language: serde_json::from_str(LANGUAGE).context("parsing en_us.json")?,
         };
         let words = data.blocks.len().div_ceil(64);
         if let Some(blocks) = data

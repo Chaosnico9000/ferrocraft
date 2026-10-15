@@ -213,7 +213,12 @@ super::configuration::keep_alive_codec!(ClientboundKeepAlive, ServerboundKeepAli
 /// Events of `minecraft:game_event` this server sends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameEventKind {
+    StartRaining = 1,
+    StopRaining = 2,
     ChangeGameMode = 3,
+    /// How strong the rain is, 0 to 1.
+    RainLevelChange = 7,
+    ThunderLevelChange = 8,
     /// Ends the "waiting for server" stage of the client's loading screen;
     /// it then waits for the chunk the player stands in.
     LevelChunksLoadStart = 13,

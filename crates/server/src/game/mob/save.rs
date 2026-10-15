@@ -86,7 +86,12 @@ pub(in crate::game) fn uuid_to_nbt(uuid: Uuid) -> Nbt {
 }
 
 pub(in crate::game) fn uuid_from_nbt(nbt: &Nbt) -> Option<Uuid> {
-    let Some(Nbt::IntArray(ints)) = nbt.get("UUID") else {
+    uuid_from_ints(nbt.get("UUID")?)
+}
+
+/// A UUID as four ints (`UUIDUtil.CODEC`).
+pub(in crate::game) fn uuid_from_ints(nbt: &Nbt) -> Option<Uuid> {
+    let Nbt::IntArray(ints) = nbt else {
         return None;
     };
     let [a, b, c, d] = ints[..] else {
@@ -129,7 +134,7 @@ impl Mob {
             ),
             ("fall_distance".into(), Nbt::Double(self.fall_distance)),
             ("Fire".into(), Nbt::Short(self.fire.clamp(-1, 32767) as i16)),
-            ("Air".into(), Nbt::Short(300)),
+            ("Air".into(), Nbt::Short(self.air.clamp(-20, 300) as i16)),
             ("OnGround".into(), Nbt::Byte(i8::from(self.on_ground))),
             ("Invulnerable".into(), Nbt::Byte(0)),
             ("PortalCooldown".into(), Nbt::Int(0)),
@@ -185,7 +190,7 @@ impl Mob {
                 entries.push(("CanBreakDoors".into(), Nbt::Byte(0)));
             }
             Kind::Creeper => {
-                entries.push(("powered".into(), Nbt::Byte(0)));
+                entries.push(("powered".into(), Nbt::Byte(i8::from(self.charged))));
                 entries.push(("Fuse".into(), Nbt::Short(30)));
                 entries.push(("ExplosionRadius".into(), Nbt::Byte(3)));
                 entries.push(("ignited".into(), Nbt::Byte(i8::from(self.ignited))));
@@ -223,6 +228,9 @@ impl Mob {
             && health.is_finite()
         {
             mob.health = health.clamp(0.0, mob.max_health);
+        }
+        if let Some(Nbt::Short(air)) = nbt.get("Air") {
+            mob.air = i32::from(*air);
         }
         if let Some(Nbt::Short(fire)) = nbt.get("Fire") {
             mob.fire = i32::from(*fire).max(0);
@@ -269,7 +277,10 @@ impl Mob {
                 }
             }
             Kind::Zombie if byte(nbt, "IsBaby") => mob.make_baby(),
-            Kind::Creeper => mob.ignited = byte(nbt, "ignited"),
+            Kind::Creeper => {
+                mob.ignited = byte(nbt, "ignited");
+                mob.charged = byte(nbt, "powered");
+            }
             _ => {}
         }
         mob.tracker = crate::game::tracker::Tracker::new(&mob.pose(), mob.tracker.interval());
@@ -379,6 +390,18 @@ impl Game {
                 self.revive_orb(entity_id, nbt);
                 true
             }
+            Some(Nbt::String(id)) if id == "minecraft:arrow" => {
+                self.revive_arrow(entity_id, nbt);
+                true
+            }
+            Some(Nbt::String(id)) if id == "minecraft:tnt" => {
+                self.revive_tnt(entity_id, nbt);
+                true
+            }
+            Some(Nbt::String(id)) if id == "minecraft:falling_block" => {
+                self.revive_falling(entity_id, nbt);
+                true
+            }
             _ => match Mob::from_nbt(entity_id, nbt, &data) {
                 Some(mob) => {
                     self.add_mob(mob);
@@ -416,6 +439,15 @@ impl Game {
                 .entry(chunk_of(orb.pos))
                 .or_default()
                 .push(orb.to_nbt());
+        }
+        // Arrows, lit TNT and falling blocks go on after a restart.
+        let flying = self
+            .arrow_nbt()
+            .into_iter()
+            .chain(self.tnt_nbt())
+            .chain(self.falling_nbt());
+        for (pos, nbt) in flying {
+            chunks.entry(chunk_of(pos)).or_default().push(nbt);
         }
         let mut regions: HashMap<(i32, i32), Vec<(ChunkPos, Nbt)>> = HashMap::new();
         for region in &self.stored.regions {

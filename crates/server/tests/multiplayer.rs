@@ -2,7 +2,8 @@
 
 mod common;
 
-use common::{Client, click, hold, join, read_matching, start, test_config, walk};
+use common::{Client, click, hold, join, read_matching, start, test_config, walk, walk_steps};
+use ferrocraft::Config;
 use ferrocraft_protocol::Nbt;
 use ferrocraft_protocol::codec::BlockPos;
 use ferrocraft_protocol::packets::play::{
@@ -95,12 +96,17 @@ async fn players_see_each_other_come_move_and_go() {
 
     // Out of Alex's view (4 chunks), Steve disappears; back, he reappears
     // where he is.
-    walk(&mut steve, [200.5, -60.0, 0.5], None).await;
+    walk_steps(&mut steve, [3.5, -60.0, 0.5], [200.5, -60.0, 0.5]).await;
     let gone = read_matching(&mut alex, |r: &RemoveEntities| r.entity_ids.0 == [steve_id]).await;
     assert_eq!(gone.entity_ids.0, [steve_id]);
-    walk(&mut steve, [10.5, -60.0, 0.5], None).await;
+    walk_steps(&mut steve, [200.5, -60.0, 0.5], [10.5, -60.0, 0.5]).await;
     let back = read_matching(&mut alex, |a: &AddEntity| a.entity_id == steve_id).await;
-    assert_eq!(back.pos, [10.5, -60.0, 0.5]);
+    // Where he is when he comes back into view, on the way.
+    assert!(
+        (10.5..120.0).contains(&back.pos[0]) && back.pos[1..] == [-60.0, 0.5],
+        "{:?}",
+        back.pos
+    );
 
     // Sneaking shows as the crouching pose.
     steve.send(&PlayerInput { flags: 0x20 }).await;
@@ -125,7 +131,11 @@ async fn players_see_each_other_come_move_and_go() {
 
 #[tokio::test]
 async fn a_far_jump_is_sent_as_an_absolute_position() {
-    let addr = start(test_config()).await;
+    let addr = start(Config {
+        operators: vec!["Steve".into()],
+        ..test_config()
+    })
+    .await;
     let (mut alex, _) = join(addr, "Alex", 10).await;
     let (mut steve, steve_login) = join(addr, "Steve", 10).await;
     read_matching(&mut alex, |a: &AddEntity| {
@@ -134,6 +144,16 @@ async fn a_far_jump_is_sent_as_an_absolute_position() {
     .await;
 
     // Twelve blocks do not fit in a delta of shorts (at most 8 blocks).
+    // The server lets such a jump through only without its movement check.
+    steve
+        .send(&ChatCommand {
+            command: "gamerule player_movement_check false".into(),
+        })
+        .await;
+    read_matching(&mut steve, |c: &SystemChat| {
+        c.content.get("translate") == Some(&Nbt::String("commands.gamerule.set".into()))
+    })
+    .await;
     walk(&mut steve, [12.5, -60.0, 0.5], None).await;
     let sync = read_matching(&mut alex, |s: &EntityPositionSync| {
         s.entity_id == steve_login.entity_id

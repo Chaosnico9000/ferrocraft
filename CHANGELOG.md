@@ -7,6 +7,75 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
 
 ### Neu
 
+- Kolben und klebrige Kolben nach Vanillas `PistonBaseBlock` und
+  `PistonStructureResolver`: Strom von jeder Seite außer vorn oder in den
+  Block darüber (Quasi-Konnektivität), bis zu zwölf Blöcke, Schleim und Honig
+  nehmen ihre Nachbarn mit (aber nicht einander), was zerbricht
+  (Fackeln, Laub) fällt als Beute ab, Obsidian und Blöcke mit Block-Entity
+  bleiben stehen. Die Bewegung läuft als Block-Event am Ende des Ticks; die
+  bewegten Blöcke stecken zwei Ticks in `moving_piston`-Blöcken
+  (`PistonMovingBlockEntity`) und landen danach. Clients sehen die Bewegung
+  aus dem Block-Event, wie bei Vanilla bekommen sie die Zwischenzustände
+  nicht. Kurze Pulse lassen klebrige Kolben ihren Block zurücklassen. Mobs,
+  Items und gezündetes TNT werden mitgeschoben.
+- Beobachter: eine Änderung vor ihnen gibt einen Puls von zwei Ticks nach
+  hinten.
+- Komparatoren: Vergleichen und Subtrahieren mit Seiteneingang, Rechtsklick
+  wechselt; sie lesen Kisten (auch doppelte), Fässer, Spender, Werfer,
+  Trichter, Öfen und Shulker-Kisten nach Füllstand, dazu Kuchen, Komposter,
+  Kessel, Endportalrahmen, Seelenanker und Kupferbirnen, auch durch einen
+  festen Block hindurch. Behälter melden Änderungen wie Vanillas
+  `updateNeighbourForOutputSignal`.
+- Redstone-Truhen geben so viel Signal, wie Spieler hineinschauen.
+- Trichter (`HopperBlockEntity`): alle 8 Ticks ein Item in den Behälter, auf
+  den sie zeigen, und eines aus dem Behälter darüber, sonst liegende Items;
+  Öfen nehmen von oben Zutaten, von der Seite Brennstoff und geben unten das
+  Ergebnis (und leere Eimer) ab. Ein Strom hält den Trichter an.
+- Werfer und Spender: Strom löst sie aus, vier Ticks später nehmen sie einen
+  zufälligen Platz. Werfer füllen den Behälter vor sich oder werfen das Item
+  hinaus; Spender schießen Pfeile, gießen und füllen Eimer, legen Feuer mit
+  dem Feuerzeug, zünden TNT und streuen Knochenmehl.
+- Feuer nach Vanillas `FireBlock`: Brennbarkeit und Abbrennen je Block aus
+  den Daten des Jars, Feuer altert, springt auf Luft neben brennbaren Blöcken
+  über, frisst sie und zündet TNT; es geht aus ohne Halt oder im Regen,
+  Netherrack brennt ewig, Seelenfeuer auf Seelensand. Lava zündet brennbare
+  Blöcke in der Nähe. Feuerzeug und Feuerkugel zünden Feuer, Lagerfeuer,
+  Kerzen und Kerzenkuchen. Pfeile, die durch Feuer oder Lava fliegen,
+  brennen, zünden TNT, das sie treffen, und setzen Getroffene fünf Sekunden
+  in Brand; Wasser und Regen löschen sie.
+- Wetter nach `ServerLevel.advanceWeatherCycle`: klare Phasen, Regen und
+  Gewitter wechseln zufällig, blenden über fünf Sekunden ein und aus, neue
+  Spieler sehen den Regen gleich. Regen löscht Feuer und brennende Spieler
+  und Mobs, hält Ackerboden nass und füllt Kessel. Bei Gewitter schlagen
+  Blitze nahe Spielern ein, zünden Feuer, schaden und laden Creeper auf
+  (doppelt so große Explosion). `/weather clear|rain|thunder [Dauer]`,
+  `/summon lightning_bolt`. Gespeichert in `data/minecraft/weather.dat`.
+- Umweltschaden wie bei Vanilla: Feuer (1, Seelenfeuer 2) und Lava (4)
+  setzen in Brand, Brennen schadet einmal pro Sekunde, Wasser und Regen
+  löschen; unter Wasser sinkt der Luftvorrat (Blasen im Client) bis zum
+  Ertrinken (2 pro Sekunde); Kakteen, Magma und Blitze schaden. Gilt für
+  Spieler und Mobs, Untote ertrinken nicht. Items verbrennen in Feuer und
+  Lava (außer Netherit). Brennen und Luft werden gespeichert.
+- Spielregeln: alle Regeln von Vanilla 26.3 mit ihren Grenzen, `/gamerule`
+  für jede, gespeichert in `data/minecraft/game_rules.dat` wie bei Vanilla.
+  Ferrocraft folgt `advance_time`, `advance_weather`, `random_tick_speed`,
+  `water_source_conversion`, `lava_source_conversion`,
+  `fire_spread_radius_around_player`, `fire_damage`, `drowning_damage`,
+  `fall_damage`, `freeze_damage`, `mob_griefing` (Creeper) und
+  `player_movement_check`.
+- Server-Konsole: Befehle auf der Standardeingabe laufen mit
+  Operator-Rechten am Weltspawn, die Antworten stehen auf Englisch im Log
+  (Vanillas `en_us.json` aus dem Server-Jar); dazu `say`, `save-all` und
+  `stop`.
+- Bewegungsprüfung nach Vanillas `handlePlayerPositionChange`: mehr als zehn
+  Blöcke in einem Tick und Bewegungen in Blöcke hinein werden mit einem
+  Teleport zurückgenommen, im Überlebensmodus auch Bewegungen, die die Blöcke
+  verhindert hätten (mit Vanillas Hochsteigen auf Stufen bis 0,6 Blöcke).
+  Wer im Überlebensmodus vier Sekunden ohne Halt schwebt, wird getrennt,
+  außer mit `allow_flight = true`.
+- Pfeile, gezündetes TNT und fallende Blöcke werden im Vanilla-Format
+  gespeichert und fliegen, brennen und fallen nach dem Neustart weiter.
+
 - Block-Updates wie Vanillas `Level.setBlock`: Ein geänderter Block sagt es
   seinen Nachbarn (`neighborChanged`, in Vanillas Reihenfolge und ohne
   Rekursion über den `CollectingNeighborUpdater`), die ihre Form anpassen
@@ -172,6 +241,16 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
 
 ### Geändert
 
+- Block-Updates ohne `UPDATE_CLIENTS` erreichen die Clients nicht mehr, wie
+  bei Vanilla: so sehen sie Kolbenbewegungen aus dem Block-Event statt aus
+  Zwischenzuständen, und unsichtbare Änderungen (Alter von Zuckerrohr)
+  bleiben beim Server.
+- Ein Spieler, der einen Block mit Wasser abbaut, lässt das Wasser stehen.
+- Die Bots gehen höchstens einen Block pro Tick, wie ein Client, damit die
+  Bewegungsprüfung sie nicht zurücksetzt.
+- Die Blockdaten (`scripts/BlockPhysics.java`) haben je Zustand das
+  Kolbenverhalten, ob ein Komparator den Block liest und ob Lava ihn
+  entzündet, je Block die Brennbarkeit.
 - Pflanzen, Fackeln und Redstone-Bauteile lassen sich nur setzen, wo sie
   halten (Samen auf Ackerboden, Zuckerrohr neben Wasser …); Fackeln an
   Wänden werden zu Wandfackeln. Gesetztes Laub zerfällt nicht. Gesetzte

@@ -12,7 +12,10 @@ use ferrocraft_protocol::packets::play::{
 use rand::Rng;
 use uuid::Uuid;
 
+use ferrocraft_protocol::Nbt;
+
 use super::explosion::Blast;
+use super::mob::save::{doubles, read_doubles, uuid_from_ints, uuid_from_nbt, uuid_to_nbt};
 use super::physics;
 use super::tracker::{Pose, Tracker};
 use super::{Encoded, EntityState, Game, Outbound};
@@ -196,6 +199,82 @@ impl Game {
         if let Some(tnt) = self.tnts.get_mut(&entity_id) {
             for (v, d) in tnt.velocity.iter_mut().zip(by) {
                 *v += d;
+            }
+        }
+    }
+
+    /// `PrimedTnt.addAdditionalSaveData` after the entity's own.
+    pub(super) fn tnt_nbt(&self) -> Vec<([f64; 3], Nbt)> {
+        self.tnts
+            .values()
+            .map(|t| {
+                let mut entries = vec![
+                    ("id".to_owned(), Nbt::String("minecraft:tnt".into())),
+                    ("Pos".into(), doubles(&t.pos)),
+                    ("Motion".into(), doubles(&t.velocity)),
+                    (
+                        "Rotation".into(),
+                        Nbt::List(vec![Nbt::Float(0.0), Nbt::Float(0.0)]),
+                    ),
+                    ("OnGround".into(), Nbt::Byte(i8::from(t.on_ground))),
+                    ("UUID".into(), uuid_to_nbt(t.uuid)),
+                    ("fuse".into(), Nbt::Short(t.fuse.clamp(0, 32767) as i16)),
+                    (
+                        "block_state".into(),
+                        Nbt::Compound(vec![("Name".into(), Nbt::String("minecraft:tnt".into()))]),
+                    ),
+                ];
+                if let Some(owner) = t.owner.and_then(|o| self.uuid_of(o)) {
+                    entries.push(("owner".into(), uuid_to_nbt(owner)));
+                }
+                (t.pos, Nbt::Compound(entries))
+            })
+            .collect()
+    }
+
+    /// Lit TNT from the entity store, burning on.
+    pub(super) fn revive_tnt(&mut self, entity_id: i32, nbt: &Nbt) {
+        let Some(pos) = read_doubles(nbt, "Pos") else {
+            return;
+        };
+        let velocity = read_doubles(nbt, "Motion").unwrap_or_default();
+        let fuse = match nbt.get("fuse") {
+            Some(Nbt::Short(f)) => i32::from(*f),
+            _ => DEFAULT_FUSE,
+        };
+        let owner = nbt
+            .get("owner")
+            .and_then(uuid_from_ints)
+            .and_then(|u| self.entity_of(u));
+        let pose = Pose {
+            pos,
+            yaw: 0.0,
+            pitch: 0.0,
+            head_yaw: 0.0,
+            on_ground: false,
+        };
+        let mut tnt = PrimedTnt {
+            entity_id,
+            uuid: uuid_from_nbt(nbt).unwrap_or_else(Uuid::new_v4),
+            pos,
+            velocity,
+            on_ground: matches!(nbt.get("OnGround"), Some(Nbt::Byte(1))),
+            fuse,
+            owner,
+            tracker: Tracker::new(&pose, UPDATE_INTERVAL),
+            sent_velocity: velocity,
+            state: None,
+        };
+        let state = tnt.state(self.tnt_type());
+        self.tnts.insert(entity_id, tnt);
+        self.broadcast(None, &Outbound::EntityAdded(state));
+    }
+
+    /// Moves lit TNT, as a piston does.
+    pub(super) fn shift_tnt(&mut self, entity_id: i32, by: [f64; 3]) {
+        if let Some(tnt) = self.tnts.get_mut(&entity_id) {
+            for (p, d) in tnt.pos.iter_mut().zip(by) {
+                *p += d;
             }
         }
     }

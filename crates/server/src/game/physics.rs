@@ -72,9 +72,8 @@ fn clip_axis(boxes: &[Aabb], bounds: Aabb, axis: usize, mut distance: f64) -> f6
     distance
 }
 
-/// Moves a box as far as the blocks let it.
-pub fn collide(world: &World, data: &GameData, bounds: Aabb, movement: [f64; 3]) -> Moved {
-    let boxes = obstacles(world, data, bounds, movement);
+/// `Entity.collideWithShapes`: how far the box goes among `boxes`.
+fn collide_boxes(boxes: &[Aabb], bounds: Aabb, movement: [f64; 3]) -> [f64; 3] {
     // y first, then the larger of x and z (`Direction.axisStepOrder`).
     let order = if movement[0].abs() < movement[2].abs() {
         [1, 2, 0]
@@ -87,17 +86,94 @@ pub fn collide(world: &World, data: &GameData, bounds: Aabb, movement: [f64; 3])
         if movement[axis] == 0.0 {
             continue;
         }
-        let distance = clip_axis(&boxes, current, axis, movement[axis]);
+        let distance = clip_axis(boxes, current, axis, movement[axis]);
         actual[axis] = distance;
         let mut step = [0.0; 3];
         step[axis] = distance;
         current = offset(current, step);
     }
+    actual
+}
+
+/// Moves a box as far as the blocks let it.
+pub fn collide(world: &World, data: &GameData, bounds: Aabb, movement: [f64; 3]) -> Moved {
+    let boxes = obstacles(world, data, bounds, movement);
+    let actual = collide_boxes(&boxes, bounds, movement);
     Moved {
         movement: actual,
         on_ground: movement[1] < 0.0 && actual[1] != movement[1],
         horizontal_collision: actual[0] != movement[0] || actual[2] != movement[2],
     }
+}
+
+/// `Entity.collide` with stepping up: a box stopped on the side while on
+/// the ground climbs up to `step_height` if that takes it farther, as
+/// players walk up slabs and stairs.
+pub fn collide_stepping(
+    world: &World,
+    data: &GameData,
+    bounds: Aabb,
+    movement: [f64; 3],
+    step_height: f64,
+    on_ground: bool,
+) -> Moved {
+    let moved = collide(world, data, bounds, movement);
+    let actual = moved.movement;
+    let landed = movement[1] < 0.0 && actual[1] != movement[1];
+    let horizontal = actual[0] != movement[0] || actual[2] != movement[2];
+    if step_height <= 0.0 || !(landed || on_ground) || !horizontal {
+        return moved;
+    }
+    let grounded = if landed {
+        offset(bounds, [0.0, actual[1], 0.0])
+    } else {
+        bounds
+    };
+    let up = [movement[0], step_height, movement[2]];
+    let mut boxes = obstacles(world, data, grounded, up);
+    if !landed {
+        boxes.extend(obstacles(world, data, grounded, [0.0, -1.0e-5, 0.0]));
+    }
+    // `collectCandidateStepUpHeights`: the tops and bottoms of what is
+    // around, within reach, lowest first.
+    let mut candidates: Vec<f64> = boxes
+        .iter()
+        .flat_map(|b| [b[1], b[4]])
+        .map(|y| y - grounded[1])
+        .filter(|&h| h >= 0.0 && h <= step_height && h != actual[1])
+        .collect();
+    candidates.sort_by(f64::total_cmp);
+    candidates.dedup();
+    let flat = |m: [f64; 3]| m[0] * m[0] + m[2] * m[2];
+    for height in candidates {
+        let stepped = collide_boxes(&boxes, grounded, [movement[0], height, movement[2]]);
+        if flat(stepped) > flat(actual) {
+            let to_ground = bounds[1] - grounded[1];
+            let movement = [stepped[0], stepped[1] - to_ground, stepped[2]];
+            return Moved {
+                movement,
+                on_ground: true,
+                horizontal_collision: movement[0] != up[0] || movement[2] != up[2],
+            };
+        }
+    }
+    moved
+}
+
+/// The collision boxes of the blocks in a box, a hair smaller.
+pub fn colliding_boxes(world: &World, data: &GameData, bounds: Aabb) -> Vec<Aabb> {
+    let shrunk = [
+        bounds[0] + 1.0e-5,
+        bounds[1] + 1.0e-5,
+        bounds[2] + 1.0e-5,
+        bounds[3] - 1.0e-5,
+        bounds[4] - 1.0e-5,
+        bounds[5] - 1.0e-5,
+    ];
+    obstacles(world, data, shrunk, [0.0; 3])
+        .into_iter()
+        .filter(|b| (0..3).all(|i| b[i] < shrunk[i + 3] && b[i + 3] > shrunk[i]))
+        .collect()
 }
 
 /// Whether any block's collision shape reaches into the box.

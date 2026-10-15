@@ -10,24 +10,32 @@
 mod blocks;
 mod combat;
 mod command;
+mod console;
+mod dispenser;
 mod explosion;
 mod falling;
+mod fire;
 mod fluid;
 mod furnace;
 mod growth;
+mod hazards;
+mod hopper;
 mod interact;
 mod item;
 mod menu;
 mod mob;
+mod movement;
 mod orb;
 mod path;
 mod physics;
+mod piston;
 mod player;
 mod projectile;
 mod redstone;
 mod survival;
 mod tnt;
 mod tracker;
+mod weather;
 
 pub use command::{OPERATOR, parse_difficulty, parse_mode, tree as command_tree};
 use menu::{Drag, Menu};
@@ -36,6 +44,7 @@ pub use player::Experience;
 use player::{ENDER_SLOTS, Food, PLAYER_UPDATE_INTERVAL};
 pub use player::{Player, abilities};
 use tracker::Tracker;
+pub use weather::Weather;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -181,6 +190,11 @@ pub enum Event {
         target: i32,
         hand: i32,
     },
+    /// A line typed into the server console; the answer, in English.
+    Console {
+        line: String,
+        reply: tokio::sync::oneshot::Sender<String>,
+    },
     /// Disconnect everyone, save, stop the game thread, then answer.
     Shutdown(tokio::sync::oneshot::Sender<()>),
 }
@@ -200,6 +214,8 @@ pub struct Joined {
     pub ender: Vec<(usize, ItemStack)>,
     pub health: f32,
     pub experience: Experience,
+    pub fire: i32,
+    pub air: i32,
     pub skin_parts: u8,
     pub main_hand: i32,
     pub outbound: UnboundedSender<Outbound>,
@@ -337,10 +353,14 @@ pub struct Context {
     /// Whether animals and monsters spawn by themselves.
     pub animals: bool,
     pub monsters: bool,
+    /// Survival players may float (`allow-flight`).
+    pub allow_flight: bool,
     /// 0 peaceful, 1 easy, 2 normal, 3 hard.
     pub difficulty: u8,
     /// Entities saved in the world, to come back near players.
     pub entities: StoredEntities,
+    pub rules: crate::rules::GameRules,
+    pub weather: Weather,
 }
 
 /// Starts the tick thread. It runs until every [`Sender`] is dropped, i.e.
@@ -392,25 +412,13 @@ struct Game {
     wire_signals: bool,
     torch_toggles: Vec<redstone::Toggle>,
     falling: HashMap<i32, falling::FallingBlock>,
-    rules: GameRules,
-}
-
-/// The game rules Ferrocraft follows (`GameRules`).
-#[derive(Debug, Clone)]
-pub struct GameRules {
-    pub random_tick_speed: u32,
-    pub water_source_conversion: bool,
-    pub lava_source_conversion: bool,
-}
-
-impl Default for GameRules {
-    fn default() -> Self {
-        Self {
-            random_tick_speed: 3,
-            water_source_conversion: true,
-            lava_source_conversion: false,
-        }
-    }
+    rules: crate::rules::GameRules,
+    weather: Weather,
+    weather_levels: weather::Levels,
+    lightning: Vec<weather::Lightning>,
+    block_events: std::collections::VecDeque<blocks::BlockEventData>,
+    /// Inside the block part of a tick (`ServerLevel.isHandlingTick`).
+    handling_tick: bool,
 }
 
 impl Game {
@@ -455,7 +463,21 @@ impl Game {
             wire_signals: true,
             torch_toggles: Vec::new(),
             falling: HashMap::new(),
-            rules: GameRules::default(),
+            rules: std::mem::take(&mut context.rules),
+            // `ServerLevel.prepareWeather`: it rains at full strength if
+            // it was raining.
+            weather_levels: weather::Levels {
+                rain: if context.weather.raining { 1.0 } else { 0.0 },
+                thunder: if context.weather.raining && context.weather.thundering {
+                    1.0
+                } else {
+                    0.0
+                },
+            },
+            weather: std::mem::take(&mut context.weather),
+            lightning: Vec::new(),
+            block_events: std::collections::VecDeque::new(),
+            handling_tick: false,
             context,
             players: HashMap::new(),
             air,
@@ -486,6 +508,7 @@ impl Game {
                 }
             }
             self.keep_alives(begin);
+            self.advance_weather();
             self.tick_players();
             self.tick_blocks();
             self.tick_items();
@@ -494,8 +517,9 @@ impl Game {
             self.tick_tnt();
             self.tick_falling();
             self.tick_orbs();
+            self.tick_lightning();
             self.tick_plates();
-            self.tick_furnaces();
+            self.tick_block_entities();
             self.send_light_updates();
             self.sync_entities();
             self.advance_time();
@@ -597,6 +621,11 @@ impl Game {
                 rot,
                 on_ground,
             } => {
+                if let Some(pos) = pos
+                    && !self.check_move(entity_id, pos)
+                {
+                    return;
+                }
                 let Some(player) = self.players.get_mut(&entity_id) else {
                     return;
                 };
@@ -710,6 +739,10 @@ impl Game {
                 target,
                 hand,
             } => self.interact(entity_id, target, hand),
+            Event::Console { line, reply } => {
+                let answer = self.console_command(&line);
+                let _ = reply.send(answer);
+            }
             Event::Shutdown(_) => unreachable!("handled by the game loop"),
         }
     }
@@ -796,6 +829,12 @@ impl Game {
             experience: joined.experience,
             xp_delay: 0,
             last_level_up: 0,
+            fire: joined.fire,
+            air: joined.air,
+            first_good: joined.pos,
+            move_packets: 0,
+            floating: false,
+            floating_ticks: 0,
         };
 
         // The newcomer learns about everyone, everyone about the newcomer.
@@ -828,6 +867,8 @@ impl Game {
         self.send_health(entity_id);
         self.send_experience(entity_id);
         self.send_difficulty(Some(entity_id));
+        self.send_weather(entity_id);
+        self.send_own_data(entity_id);
         if self.players.get(&entity_id).is_some_and(|p| p.dead) {
             // Saved dead: straight to the death screen.
             self.die(
@@ -979,6 +1020,10 @@ impl Game {
         if let Err(err) = self.context.level.save(&storage, LAYERS, BIOME, difficulty) {
             warn!("saving level.dat failed: {err:#}");
         }
+        if let Err(err) = self.rules.save(&storage) {
+            warn!("saving the game rules failed: {err:#}");
+        }
+        self.save_weather(&storage);
         // Chunks with ticks waiting are saved with them.
         for chunk in self
             .block_ticks
@@ -1059,9 +1104,12 @@ impl Game {
     /// Day and night go on; every second the clients hear the game time, as
     /// from vanilla, and keep their clocks running in between.
     fn advance_time(&mut self) {
+        let advance = self.rules.flag("advance_time");
         let level = &mut self.context.level;
         level.game_time += 1;
-        level.day_time += 1;
+        if advance {
+            level.day_time += 1;
+        }
         let time = level.day_time.rem_euclid(24000);
         self.sky_darken = sky_darken(time);
         self.monsters_burn = monsters_burn(time);
@@ -1165,6 +1213,28 @@ impl Game {
             }
             None => self.broadcast(None, &packet),
         }
+    }
+
+    /// The UUID of a player or mob.
+    fn uuid_of(&self, entity_id: i32) -> Option<Uuid> {
+        self.players
+            .get(&entity_id)
+            .map(Player::uuid)
+            .or_else(|| self.mobs.get(&entity_id).map(mob::Mob::uuid))
+    }
+
+    /// The player or mob with this UUID, if it is in the game.
+    fn entity_of(&self, uuid: Uuid) -> Option<i32> {
+        self.players
+            .values()
+            .find(|p| p.uuid() == uuid)
+            .map(|p| p.entity_id)
+            .or_else(|| {
+                self.mobs
+                    .values()
+                    .find(|m| m.uuid() == uuid)
+                    .map(|m| m.entity_id)
+            })
     }
 
     /// Everything thrown or dropped that a new player should see besides

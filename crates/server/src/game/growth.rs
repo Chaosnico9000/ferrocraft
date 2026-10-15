@@ -18,7 +18,7 @@ use crate::inventory;
 use crate::tree;
 
 /// `LevelEvent.PARTICLES_AND_SOUND_PLANT_GROWTH`.
-const LEVEL_EVENT_BONE_MEAL: i32 = 1505;
+pub(super) const LEVEL_EVENT_BONE_MEAL: i32 = 1505;
 
 /// The flowers bone meal brings up on grass in the plains
 /// (`flower_plains`).
@@ -265,7 +265,7 @@ impl Game {
     /// dirt elsewhere unless a crop holds it.
     pub(super) fn farmland_random_tick(&mut self, pos: BlockPos, state: u32) {
         let moisture = self.int_value(state, "moisture").unwrap_or(0);
-        if self.near_water(pos) {
+        if self.near_water(pos) || self.is_raining_at(above(pos)) {
             if moisture < 7 {
                 let wet = self.with(state, "moisture", "7");
                 self.set_block_with(pos, wet, update::CLIENTS);
@@ -686,7 +686,7 @@ impl Game {
     }
 
     /// `BoneMealItem.growCrop`: whether the block takes bone meal.
-    fn bone_meal(&mut self, pos: BlockPos) -> bool {
+    pub(super) fn bone_meal(&mut self, pos: BlockPos) -> bool {
         let state = self.context.world.block(pos);
         let mut rng = rand::rng();
         match self.kind(state) {

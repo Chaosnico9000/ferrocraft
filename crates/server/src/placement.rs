@@ -49,6 +49,42 @@ pub fn looking(yaw: f32) -> Direction {
     }
 }
 
+/// `Direction.orderedByNearest(entity)[0]`: the direction a player with
+/// this yaw and pitch looks in most.
+pub fn nearest_looking(yaw: f32, pitch: f32) -> Direction {
+    let pitch = pitch.to_radians();
+    let yaw = -yaw.to_radians();
+    let (pitch_sin, pitch_cos) = (pitch.sin(), pitch.cos());
+    let (yaw_sin, yaw_cos) = (yaw.sin(), yaw.cos());
+    let (x_pos, y_pos, z_pos) = (yaw_sin > 0.0, pitch_sin < 0.0, yaw_cos > 0.0);
+    let x_yaw = if x_pos { yaw_sin } else { -yaw_sin };
+    let y_mag = if y_pos { -pitch_sin } else { pitch_sin };
+    let z_yaw = if z_pos { yaw_cos } else { -yaw_cos };
+    let (x_mag, z_mag) = (x_yaw * pitch_cos, z_yaw * pitch_cos);
+    let axis_x = if x_pos {
+        Direction::East
+    } else {
+        Direction::West
+    };
+    let axis_y = if y_pos {
+        Direction::Up
+    } else {
+        Direction::Down
+    };
+    let axis_z = if z_pos {
+        Direction::South
+    } else {
+        Direction::North
+    };
+    if x_yaw > z_yaw {
+        if y_mag > x_mag { axis_y } else { axis_x }
+    } else if y_mag > z_mag {
+        axis_y
+    } else {
+        axis_z
+    }
+}
+
 pub fn opposite(direction: Direction) -> Direction {
     match direction {
         Direction::Down => Direction::Up,
@@ -296,6 +332,15 @@ mod tests {
         assert!(within_reach(eyes, BlockPos { x: 5, y: -59, z: 0 }));
         assert!(!within_reach(eyes, BlockPos { x: 7, y: -59, z: 0 }));
         assert!(within_reach(eyes, BlockPos { x: 0, y: -61, z: 0 }));
+    }
+
+    #[test]
+    fn looking_up_and_down_counts() {
+        assert_eq!(nearest_looking(0.0, 0.0), Direction::South);
+        assert_eq!(nearest_looking(0.0, 80.0), Direction::Down);
+        assert_eq!(nearest_looking(90.0, -60.0), Direction::Up);
+        assert_eq!(nearest_looking(-90.0, 10.0), Direction::East);
+        assert_eq!(nearest_looking(180.0, 30.0), Direction::North);
     }
 
     #[test]

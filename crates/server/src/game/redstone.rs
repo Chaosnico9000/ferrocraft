@@ -92,11 +92,11 @@ impl Game {
                     0
                 }
             }
-            Kind::Repeater => {
+            Kind::Repeater | Kind::Comparator | Kind::Observer => {
                 if self.direction_value(state, "facing") == Some(direction)
                     && self.bool_value(state, "powered")
                 {
-                    15
+                    self.diode_output(pos, state)
                 } else {
                     0
                 }
@@ -110,7 +110,23 @@ impl Game {
             }
             Kind::PressurePlate | Kind::WeightedPressurePlate => self.plate_signal(state),
             Kind::RedstoneBlock => 15,
+            // `TrappedChestBlock`: as many as look inside.
+            Kind::TrappedChest => self.openers.get(&pos).map_or(0, |&n| n.min(15) as i32),
             _ => 0,
+        }
+    }
+
+    /// `getOutputSignal`: a repeater or observer gives 15, a comparator
+    /// what it worked out last.
+    fn diode_output(&self, pos: BlockPos, state: u32) -> i32 {
+        if self.kind(state) == Kind::Comparator {
+            self.context
+                .world
+                .block_entity(pos)
+                .and_then(|e| e.comparator)
+                .unwrap_or(0)
+        } else {
+            15
         }
     }
 
@@ -132,7 +148,12 @@ impl Game {
                     0
                 }
             }
-            Kind::Repeater => self.block_signal(pos, state, direction),
+            Kind::Repeater | Kind::Comparator | Kind::Observer => {
+                self.block_signal(pos, state, direction)
+            }
+            Kind::TrappedChest if direction == Direction::Up => {
+                self.block_signal(pos, state, direction)
+            }
             Kind::Lever | Kind::Button => {
                 let connected = self.attached_towards(state).map(opposite);
                 if self.bool_value(state, "powered") && connected == Some(direction) {
@@ -199,7 +220,7 @@ impl Game {
     fn control_input_signal(&self, pos: BlockPos, direction: Direction, diodes_only: bool) -> i32 {
         let state = self.context.world.block(pos);
         if diodes_only {
-            return if self.kind(state) == Kind::Repeater {
+            return if matches!(self.kind(state), Kind::Repeater | Kind::Comparator) {
                 self.direct_signal(pos, state, direction)
             } else {
                 0
@@ -262,6 +283,9 @@ impl Game {
             Kind::Repeater => {
                 let facing = self.direction_value(state, "facing");
                 direction.is_some_and(|d| facing == Some(d) || facing == Some(opposite(d)))
+            }
+            Kind::Observer => {
+                direction.is_some() && direction == self.direction_value(state, "facing")
             }
             _ => self.flag(state, flags::SIGNAL_SOURCE) && direction.is_some(),
         }
@@ -629,9 +653,12 @@ impl Game {
         }
     }
 
-    // --- Repeaters -------------------------------------------------------------------
+    // --- Repeaters and comparators (`DiodeBlock`) -------------------------------------
 
     fn repeater_delay(&self, state: u32) -> u64 {
+        if self.kind(state) == Kind::Comparator {
+            return 2;
+        }
         self.int_value(state, "delay").unwrap_or(1) as u64 * 2
     }
 
@@ -649,15 +676,75 @@ impl Game {
         input.max(self.wire_power(self.context.world.block(behind)))
     }
 
-    /// `RepeaterBlock.isLocked`: a powered repeater at its side.
-    pub(super) fn repeater_locked(&self, pos: BlockPos, state: u32) -> bool {
+    /// `ComparatorBlock.getInputSignal`: what is behind may be read
+    /// instead, also through a solid block.
+    fn comparator_input(&self, pos: BlockPos, state: u32) -> i32 {
+        let mut signal = self.repeater_input(pos, state);
         let Some(facing) = self.direction_value(state, "facing") else {
-            return false;
+            return signal;
+        };
+        let world = &self.context.world;
+        let target = facing.offset(pos);
+        let target_state = world.block(target);
+        if self.flag(target_state, flags::ANALOG) {
+            signal = self.analog_output(target, target_state, opposite(facing));
+        } else if signal < 15 && self.flag(target_state, flags::CONDUCTOR) {
+            let further = facing.offset(target);
+            let further_state = world.block(further);
+            if self.flag(further_state, flags::ANALOG) {
+                signal = self.analog_output(further, further_state, opposite(facing));
+            }
+        }
+        signal
+    }
+
+    /// `getAlternateSignal`: the stronger side.
+    fn alternate_signal(&self, pos: BlockPos, state: u32) -> i32 {
+        let Some(facing) = self.direction_value(state, "facing") else {
+            return 0;
         };
         let (cw, ccw) = (clockwise(facing), counter_clockwise(facing));
-        self.control_input_signal(cw.offset(pos), cw, true)
-            .max(self.control_input_signal(ccw.offset(pos), ccw, true))
-            > 0
+        let diodes_only = self.kind(state) == Kind::Repeater;
+        self.control_input_signal(cw.offset(pos), cw, diodes_only)
+            .max(self.control_input_signal(ccw.offset(pos), ccw, diodes_only))
+    }
+
+    fn subtracts(&self, state: u32) -> bool {
+        self.value(state, "mode") == Some("subtract")
+    }
+
+    /// `shouldTurnOn`.
+    fn diode_should_turn_on(&self, pos: BlockPos, state: u32) -> bool {
+        if self.kind(state) != Kind::Comparator {
+            return self.repeater_input(pos, state) > 0;
+        }
+        let input = self.comparator_input(pos, state);
+        if input == 0 {
+            return false;
+        }
+        let side = self.alternate_signal(pos, state);
+        input > side || (input == side && !self.subtracts(state))
+    }
+
+    /// `ComparatorBlock.calculateOutputSignal`.
+    fn comparator_output(&self, pos: BlockPos, state: u32) -> i32 {
+        let input = self.comparator_input(pos, state);
+        if input == 0 {
+            return 0;
+        }
+        let side = self.alternate_signal(pos, state);
+        if side > input {
+            0
+        } else if self.subtracts(state) {
+            input - side
+        } else {
+            input
+        }
+    }
+
+    /// `RepeaterBlock.isLocked`: a powered repeater at its side.
+    pub(super) fn repeater_locked(&self, pos: BlockPos, state: u32) -> bool {
+        self.kind(state) == Kind::Repeater && self.alternate_signal(pos, state) > 0
     }
 
     pub(super) fn repeater_placement(&self, pos: BlockPos, state: u32) -> u32 {
@@ -665,8 +752,8 @@ impl Game {
         self.with(state, "locked", if locked { "true" } else { "false" })
     }
 
-    /// `RepeaterBlock.updateShape`.
-    pub(super) fn repeater_shape(
+    /// `RepeaterBlock` and `ComparatorBlock.updateShape`.
+    pub(super) fn diode_shape(
         &self,
         pos: BlockPos,
         state: u32,
@@ -682,6 +769,9 @@ impl Game {
         {
             return self.air;
         }
+        if self.kind(state) == Kind::Comparator {
+            return state;
+        }
         let facing = self.direction_value(state, "facing");
         let same_axis = facing.is_some_and(|f| f == direction || opposite(f) == direction);
         if is_horizontal(direction) && !same_axis {
@@ -696,7 +786,7 @@ impl Game {
             return;
         }
         let on = self.bool_value(state, "powered");
-        let should = self.repeater_input(pos, state) > 0;
+        let should = self.diode_should_turn_on(pos, state);
         if on && !should {
             let off = self.with(state, "powered", "false");
             self.set_block_with(pos, off, update::CLIENTS);
@@ -710,7 +800,8 @@ impl Game {
         }
     }
 
-    pub(super) fn repeater_neighbor_changed(&mut self, pos: BlockPos, state: u32) {
+    /// `DiodeBlock.neighborChanged`.
+    pub(super) fn diode_neighbor_changed(&mut self, pos: BlockPos, state: u32) {
         if !self.can_survive(pos, state) {
             self.drop_resources(pos, state);
             self.set_block(pos, self.air);
@@ -720,22 +811,17 @@ impl Game {
             }
             return;
         }
+        if self.kind(state) == Kind::Comparator {
+            self.comparator_check(pos, state);
+            return;
+        }
         if self.repeater_locked(pos, state) {
             return;
         }
         let on = self.bool_value(state, "powered");
-        let should = self.repeater_input(pos, state) > 0;
+        let should = self.diode_should_turn_on(pos, state);
         if on != should && !self.block_tick_runs_now(pos, state) {
-            let facing = self.direction_value(state, "facing");
-            // `shouldPrioritize`: a repeater in front that does not face
-            // back.
-            let front = facing.map(|f| opposite(f).offset(pos));
-            let prioritized = front.is_some_and(|front| {
-                let front_state = self.context.world.block(front);
-                self.kind(front_state) == Kind::Repeater
-                    && self.direction_value(front_state, "facing") != facing.map(opposite)
-            });
-            let priority = if prioritized {
+            let priority = if self.diode_prioritized(pos, state) {
                 priority::EXTREMELY_HIGH
             } else if on {
                 priority::VERY_HIGH
@@ -747,8 +833,82 @@ impl Game {
         }
     }
 
+    /// `shouldPrioritize`: a repeater or comparator in front that does not
+    /// face back.
+    fn diode_prioritized(&self, pos: BlockPos, state: u32) -> bool {
+        let Some(facing) = self.direction_value(state, "facing") else {
+            return false;
+        };
+        let front_state = self.context.world.block(opposite(facing).offset(pos));
+        matches!(self.kind(front_state), Kind::Repeater | Kind::Comparator)
+            && self.direction_value(front_state, "facing") != Some(opposite(facing))
+    }
+
+    /// `ComparatorBlock.checkTickOnNeighbor`.
+    fn comparator_check(&mut self, pos: BlockPos, state: u32) {
+        if self.block_tick_runs_now(pos, state) {
+            return;
+        }
+        let output = self.comparator_output(pos, state);
+        let old = self.diode_output(pos, state);
+        if output != old
+            || self.bool_value(state, "powered") != self.diode_should_turn_on(pos, state)
+        {
+            let priority = if self.diode_prioritized(pos, state) {
+                priority::HIGH
+            } else {
+                priority::NORMAL
+            };
+            self.schedule_block_tick(pos, state, 2, priority);
+        }
+    }
+
+    /// `ComparatorBlock.refreshOutputState`, its tick.
+    pub(super) fn comparator_refresh(&mut self, pos: BlockPos, state: u32) {
+        let output = self.comparator_output(pos, state);
+        let mut old = 0;
+        self.context.world.change_block_entity(pos, |entity| {
+            let Some(signal) = &mut entity.comparator else {
+                return false;
+            };
+            old = *signal;
+            *signal = output;
+            old != output
+        });
+        if old != output || !self.subtracts(state) {
+            let should = self.diode_should_turn_on(pos, state);
+            let on = self.bool_value(state, "powered");
+            if on && !should {
+                let off = self.with(state, "powered", "false");
+                self.set_block_with(pos, off, update::CLIENTS);
+            } else if !on && should {
+                let powered = self.with(state, "powered", "true");
+                self.set_block_with(pos, powered, update::CLIENTS);
+            }
+            self.diode_update_front(pos, state);
+        }
+    }
+
+    /// `ComparatorBlock.useWithoutItem`: compare and subtract in turn.
+    pub(super) fn cycle_comparator(&mut self, pos: BlockPos, state: u32) {
+        let subtract = !self.subtracts(state);
+        let next = self.with(state, "mode", if subtract { "subtract" } else { "compare" });
+        let pitch = if subtract { 0.55 } else { 0.5 };
+        self.play_sound(
+            None,
+            "minecraft:block.comparator.click",
+            center(pos),
+            0.3,
+            pitch,
+        );
+        self.set_block_with(pos, next, update::CLIENTS);
+        if self.kind(self.context.world.block(pos)) == Kind::Comparator {
+            self.comparator_refresh(pos, next);
+        }
+    }
+
     /// `DiodeBlock.updateNeighborsInFront`.
-    pub(super) fn repeater_update_front(&mut self, pos: BlockPos, state: u32) {
+    pub(super) fn diode_update_front(&mut self, pos: BlockPos, state: u32) {
         let Some(facing) = self.direction_value(state, "facing") else {
             return;
         };
@@ -767,8 +927,146 @@ impl Game {
 
     /// `DiodeBlock.setPlacedBy`.
     pub(super) fn repeater_placed(&mut self, pos: BlockPos, state: u32) {
-        if self.repeater_input(pos, state) > 0 {
+        if self.diode_should_turn_on(pos, state) {
             self.schedule_block_tick(pos, state, 1, priority::NORMAL);
+        }
+    }
+
+    // --- Observers -----------------------------------------------------------------------
+
+    /// `ObserverBlock.updateShape`: a change in front starts a pulse.
+    pub(super) fn observer_shape(&mut self, pos: BlockPos, state: u32, direction: Direction) {
+        if self.direction_value(state, "facing") == Some(direction)
+            && !self.bool_value(state, "powered")
+            && !self.block_tick_scheduled(pos, state)
+        {
+            self.schedule_block_tick(pos, state, 2, priority::NORMAL);
+        }
+    }
+
+    /// `ObserverBlock.tick`: on for two ticks, then off.
+    pub(super) fn observer_tick(&mut self, pos: BlockPos, state: u32) {
+        let next = if self.bool_value(state, "powered") {
+            self.with(state, "powered", "false")
+        } else {
+            let on = self.with(state, "powered", "true");
+            self.schedule_block_tick(pos, on, 2, priority::NORMAL);
+            on
+        };
+        self.set_block_with(pos, next, update::CLIENTS);
+        self.diode_update_front(pos, state);
+    }
+
+    /// `ObserverBlock.onPlace`: one placed powered goes off at once.
+    pub(super) fn observer_on_place(&mut self, pos: BlockPos, state: u32) {
+        if self.bool_value(state, "powered") && !self.block_tick_scheduled(pos, state) {
+            let off = self.with(state, "powered", "false");
+            self.set_block_with(pos, off, update::CLIENTS | update::KNOWN_SHAPE);
+            self.diode_update_front(pos, off);
+        }
+    }
+
+    /// `ObserverBlock.affectNeighborsAfterRemoval`.
+    pub(super) fn observer_removed(&mut self, pos: BlockPos, state: u32) {
+        if self.bool_value(state, "powered") && self.block_tick_scheduled(pos, state) {
+            let off = self.with(state, "powered", "false");
+            self.diode_update_front(pos, off);
+        }
+    }
+
+    // --- What comparators read -----------------------------------------------------
+
+    /// `getAnalogOutputSignal`.
+    pub(super) fn analog_output(&self, pos: BlockPos, state: u32, _direction: Direction) -> i32 {
+        let int = |key| self.int_value(state, key).unwrap_or(0);
+        match self.kind(state) {
+            Kind::TrappedChest => return self.container_signal(&self.chest_halves(pos, false)),
+            Kind::Hopper | Kind::Dispenser | Kind::Dropper => {
+                return self.container_signal(&[pos]);
+            }
+            _ => {}
+        }
+        let data = &self.context.data;
+        let Some((_, block)) = data.block_of(state) else {
+            return 0;
+        };
+        let name = block.name.as_str();
+        match name {
+            "minecraft:chest" => self.container_signal(&self.chest_halves(pos, false)),
+            "minecraft:cake" => (7 - int("bites")) * 2,
+            "minecraft:composter"
+            | "minecraft:water_cauldron"
+            | "minecraft:powder_snow_cauldron" => int("level"),
+            "minecraft:lava_cauldron" => 3,
+            "minecraft:end_portal_frame" => {
+                if self.bool_value(state, "eye") {
+                    15
+                } else {
+                    0
+                }
+            }
+            "minecraft:respawn_anchor" => (int("charges") as f32 / 4.0 * 15.0).floor() as i32,
+            _ if name.ends_with("candle_cake") => 14,
+            _ if name.ends_with("copper_bulb") => {
+                if self.bool_value(state, "lit") {
+                    15
+                } else {
+                    0
+                }
+            }
+            _ if block.block_entity.is_some() => self.container_signal(&[pos]),
+            _ => 0,
+        }
+    }
+
+    /// `getRedstoneSignalFromContainer` over the containers that make one
+    /// (both halves of a double chest).
+    pub(super) fn container_signal(&self, containers: &[BlockPos]) -> i32 {
+        let data = &self.context.data;
+        let mut total = 0.0f32;
+        let mut size = 0;
+        for &pos in containers {
+            let Some(entity) = self.context.world.block_entity(pos) else {
+                continue;
+            };
+            size += entity.items.len();
+            for stack in entity.items.iter().flatten() {
+                let max = data.item(stack.item).map_or(64, |i| i.stack).clamp(1, 99);
+                total += stack.count as f32 / max as f32;
+            }
+        }
+        if size == 0 {
+            return 0;
+        }
+        let fill = total / size as f32;
+        // `Mth.lerpDiscrete(fill, 0, 15)`.
+        (fill * 14.0).floor() as i32 + i32::from(fill > 0.0)
+    }
+
+    /// `Level.updateNeighbourForOutputSignal`: comparators next to `pos`,
+    /// or behind a solid block next to it, look again.
+    pub(super) fn update_neighbour_for_output_signal(&mut self, pos: BlockPos, source: usize) {
+        for direction in HORIZONTAL {
+            let mut neighbour = direction.offset(pos);
+            let mut state = self.context.world.block(neighbour);
+            if self.kind(state) != Kind::Comparator && self.flag(state, flags::CONDUCTOR) {
+                neighbour = direction.offset(neighbour);
+                state = self.context.world.block(neighbour);
+            }
+            if self.kind(state) == Kind::Comparator {
+                self.diode_neighbor_changed(neighbour, state);
+                let _ = source;
+            }
+        }
+    }
+
+    /// `BlockEntity.setChanged` of a container: comparators reading it
+    /// look again.
+    pub(super) fn container_changed(&mut self, pos: BlockPos) {
+        let state = self.context.world.block(pos);
+        if !self.is_air(state) {
+            let id = self.block_id(state);
+            self.update_neighbour_for_output_signal(pos, id);
         }
     }
 

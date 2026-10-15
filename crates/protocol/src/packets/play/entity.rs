@@ -137,6 +137,8 @@ impl EntityData {
 pub mod data_index {
     /// Bit set: 0x02 crouching, 0x08 sprinting, 0x20 invisible, ...
     pub const SHARED_FLAGS: u8 = 0;
+    /// Breath left underwater (`Entity.DATA_AIR_SUPPLY_ID`), 300 when full.
+    pub const AIR_SUPPLY: u8 = 1;
     pub const POSE: u8 = 6;
     pub const HEALTH: u8 = 9;
     pub const MAIN_HAND: u8 = 15;

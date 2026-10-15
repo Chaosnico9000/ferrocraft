@@ -13,6 +13,7 @@ mod login;
 mod loot;
 mod placement;
 mod play;
+pub mod rules;
 mod status;
 pub mod storage;
 mod tree;
@@ -130,6 +131,13 @@ impl Server {
             None => None,
         }
         .unwrap_or_else(|| Level::new(spawn, default_game_mode as i32));
+        let (rules, weather) = match &storage {
+            Some(storage) => (
+                rules::GameRules::load(storage)?,
+                game::Weather::load(storage)?,
+            ),
+            None => Default::default(),
+        };
         let keys = if config.online_mode {
             Some(Keys::generate()?)
         } else {
@@ -148,8 +156,11 @@ impl Server {
             entity_ids: Arc::clone(&next_entity_id),
             animals: config.animals,
             monsters: config.monsters,
+            allow_flight: config.allow_flight,
             difficulty,
             entities,
+            rules,
+            weather,
         });
         Ok(Arc::new(Self {
             config,
@@ -175,6 +186,28 @@ impl Server {
         let (done, saved) = tokio::sync::oneshot::channel();
         self.tick_event(Event::Shutdown(done));
         let _ = saved.await;
+    }
+
+    /// Runs a line typed into the server console as an operator would;
+    /// the answer as the console shows it.
+    pub async fn console(&self, line: &str) -> String {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.tick_event(Event::Console {
+            line: line.to_owned(),
+            reply,
+        });
+        answer.await.unwrap_or_default()
+    }
+
+    /// Hands a console line to the game without waiting for the answer,
+    /// which goes to the log; lines typed together run in the same tick,
+    /// as in vanilla.
+    pub fn console_line(&self, line: &str) {
+        let (reply, _) = tokio::sync::oneshot::channel();
+        self.tick_event(Event::Console {
+            line: line.to_owned(),
+            reply,
+        });
     }
 
     fn next_entity_id(&self) -> i32 {

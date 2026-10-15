@@ -43,6 +43,8 @@ const BABY: u8 = 16;
 /// `Creeper.DATA_SWELL_DIR` and `DATA_IS_IGNITED`.
 const CREEPER_SWELL_DIR: u8 = 16;
 const CREEPER_IGNITED: u8 = 18;
+/// `Creeper.DATA_IS_POWERED`: struck by lightning.
+const CREEPER_POWERED: u8 = 17;
 /// `Spider.DATA_FLAGS_ID`: 0x01 climbing.
 const SPIDER_FLAGS: u8 = 16;
 /// Ticks a mob shows its death before it goes (`LivingEntity.tickDeath`).
@@ -262,7 +264,11 @@ pub struct Mob {
     love_cause: Option<i32>,
     love_time: i32,
     /// Ticks left burning (`remainingFireTicks`).
-    fire: i32,
+    pub(super) fire: i32,
+    /// Breath left under water (`airSupply`).
+    pub(super) air: i32,
+    /// Creepers: charged by lightning.
+    pub(super) charged: bool,
     fall_distance: f64,
     /// The player it is after.
     target: Option<i32>,
@@ -361,6 +367,8 @@ impl Mob {
             love_cause: None,
             love_time: 0,
             fire: 0,
+            air: crate::storage::MAX_AIR,
+            charged: false,
             fall_distance: 0.0,
             target: None,
             unseen: 0,
@@ -427,7 +435,7 @@ impl Mob {
         [x - w, y, z - w, x + w, y + self.height, z + w]
     }
 
-    fn eyes(&self) -> [f64; 3] {
+    pub(super) fn eyes(&self) -> [f64; 3] {
         [self.pos[0], self.pos[1] + self.eye_height, self.pos[2]]
     }
 
@@ -451,6 +459,26 @@ impl Mob {
 
     pub fn alive(&self) -> bool {
         self.death.is_none()
+    }
+
+    pub(super) fn type_id(&self) -> i32 {
+        self.type_id
+    }
+
+    pub(super) fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+
+    pub(super) fn mark_dirty(&mut self) {
+        self.data_dirty = true;
+    }
+
+    /// The part of `thunderHit` that depends on the kind: creepers charge.
+    pub(super) fn thunder_hit(&mut self) {
+        if self.kind == Kind::Creeper {
+            self.charged = true;
+        }
+        self.data_dirty = true;
     }
 
     /// `Entity.DATA_SHARED_FLAGS_ID`: 0x01 on fire.
@@ -506,6 +534,11 @@ impl Mob {
                     CREEPER_SWELL_DIR,
                     EntityData::Int(self.swell_dir),
                     self.swell_dir != -1,
+                );
+                push(
+                    CREEPER_POWERED,
+                    EntityData::Boolean(self.charged),
+                    self.charged,
                 );
                 push(
                     CREEPER_IGNITED,
@@ -721,6 +754,7 @@ impl Game {
         self.steer(entity_id);
         self.move_mob(entity_id);
         self.live(entity_id);
+        self.tick_mob_hazards(entity_id);
         if hostile {
             self.after_move_monster(entity_id);
         }
@@ -996,11 +1030,15 @@ impl Game {
     }
 
     /// Sets a mob alight for `seconds` (`Entity.igniteForSeconds`).
+    pub(super) fn ignite_mob(&mut self, entity_id: i32, seconds: i32) {
+        self.ignite(entity_id, seconds);
+    }
+
     fn ignite(&mut self, entity_id: i32, seconds: i32) {
         if let Some(mob) = self.mobs.get_mut(&entity_id) {
             let ticks = seconds * 20;
             if mob.fire < ticks {
-                if mob.fire == 0 {
+                if mob.fire <= 0 {
                     mob.data_dirty = true;
                 }
                 mob.fire = ticks;

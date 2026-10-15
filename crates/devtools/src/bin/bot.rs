@@ -44,6 +44,8 @@ use rand::{Rng, SeedableRng};
 
 /// Blocks per tick, about vanilla's walking speed.
 const SPEED: f64 = 0.2;
+/// The farthest a bot moves in one tick.
+const MAX_STEP: f64 = 1.0;
 /// The hotbar slot every bot holds things in.
 const HAND: i16 = 36;
 /// How far from spawn the bots that do things set up.
@@ -249,6 +251,9 @@ struct Bot {
     /// Where builders, house keepers and throwers work.
     site: [f64; 3],
     pos: [f64; 3],
+    /// Where the server has us: the bot walks towards `pos` from here at
+    /// most a block a tick, as servers refuse bigger jumps.
+    sent: [f64; 3],
     rot: [f32; 2],
     on_ground: bool,
     angle: f64,
@@ -371,9 +376,16 @@ impl Bot {
     }
 
     async fn send_movement(&mut self) {
+        let delta: [f64; 3] = std::array::from_fn(|i| self.pos[i] - self.sent[i]);
+        let distance = delta.iter().map(|d| d * d).sum::<f64>().sqrt();
+        if distance > MAX_STEP {
+            self.sent = std::array::from_fn(|i| self.sent[i] + delta[i] / distance * MAX_STEP);
+        } else {
+            self.sent = self.pos;
+        }
         let mut body = Vec::new();
         let id = MovePlayer {
-            pos: Some(self.pos),
+            pos: Some(self.sent),
             rot: Some(self.rot),
             flags: u8::from(self.on_ground),
         }
@@ -683,6 +695,7 @@ async fn run(
         spawn: [0.0; 3],
         site: [0.0; 3],
         pos: [0.0; 3],
+        sent: [0.0; 3],
         rot: [0.0; 2],
         on_ground: true,
         angle: phase,
@@ -737,6 +750,7 @@ async fn run(
                             ];
                         }
                         bot.pos = to.pos;
+                        bot.sent = to.pos;
                     }
                     OpenScreen::ID => {
                         let screen = OpenScreen::from_raw(&raw).unwrap();

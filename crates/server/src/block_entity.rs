@@ -5,11 +5,11 @@
 
 use ferrocraft_protocol::Nbt;
 use ferrocraft_protocol::codec::BlockPos;
-use ferrocraft_protocol::packets::play::ItemStack;
+use ferrocraft_protocol::packets::play::{Direction, ItemStack};
 
 use crate::crafting::Cooker;
 use crate::data::GameData;
-use crate::storage::{item_from_nbt, item_to_nbt};
+use crate::storage::{item_from_nbt, item_to_nbt, state_from_nbt, state_to_nbt};
 
 /// Slots of the containers Ferrocraft knows, by block entity type.
 pub fn container_size(kind: &str) -> usize {
@@ -68,6 +68,45 @@ impl Default for Furnace {
     }
 }
 
+/// A block on its way, pushed or pulled by a piston
+/// (`PistonMovingBlockEntity`): it sits in the moving piston block where it
+/// will end up.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Moving {
+    /// The block that moves (`movedState`).
+    pub state: u32,
+    /// Which way the piston faces.
+    pub facing: Direction,
+    /// 0 to 1, half a block a tick.
+    pub progress: f32,
+    pub progress_old: f32,
+    pub extending: bool,
+    /// The piston's own head or base.
+    pub source: bool,
+    /// The game tick it last moved in.
+    pub last_ticked: i64,
+}
+
+/// A hopper's wait before it moves the next item (`TransferCooldown`) and
+/// the tick it last ran in.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Hopper {
+    pub cooldown: i32,
+    pub ticked: i64,
+}
+
+/// Keys of the block entities Ferrocraft models beyond items, which it
+/// writes itself.
+const MODELLED_KEYS: [&str; 7] = [
+    "blockState",
+    "facing",
+    "progress",
+    "extending",
+    "source",
+    "OutputSignal",
+    "TransferCooldown",
+];
+
 /// Keys of a furnace's saved data.
 const FURNACE_KEYS: [&str; 6] = [
     "cooking_time_spent",
@@ -91,6 +130,11 @@ pub struct BlockEntity {
     pub sign: Option<[Nbt; 2]>,
     pub waxed: bool,
     pub furnace: Option<Furnace>,
+    /// A moving piston's block.
+    pub moving: Option<Moving>,
+    /// A comparator's output (`OutputSignal`).
+    pub comparator: Option<i32>,
+    pub hopper: Option<Hopper>,
     /// As loaded, for everything Ferrocraft does not model.
     stored: Option<Nbt>,
     /// Changed since it was loaded.
@@ -105,6 +149,20 @@ impl BlockEntity {
             sign: is_sign(kind).then(|| [empty_side(), empty_side()]),
             waxed: false,
             furnace: Cooker::of(kind).map(|_| Furnace::default()),
+            moving: (kind == "minecraft:piston").then_some(Moving {
+                state: 0,
+                facing: Direction::Down,
+                progress: 0.0,
+                progress_old: 0.0,
+                extending: false,
+                source: false,
+                last_ticked: 0,
+            }),
+            comparator: (kind == "minecraft:comparator").then_some(0),
+            hopper: (kind == "minecraft:hopper").then_some(Hopper {
+                cooldown: -1,
+                ticked: 0,
+            }),
             stored: None,
             modified: true,
         }
@@ -165,6 +223,30 @@ impl BlockEntity {
                     .collect();
             }
         }
+        if let Some(moving) = &mut entity.moving {
+            if let Some(state) = nbt.get("blockState").and_then(|s| state_from_nbt(s, data)) {
+                moving.state = state;
+            }
+            if let Some(Nbt::Int(facing)) = nbt.get("facing") {
+                moving.facing = Direction::from_id(*facing).unwrap_or(Direction::Down);
+            }
+            if let Some(Nbt::Float(progress)) = nbt.get("progress") {
+                moving.progress = *progress;
+                moving.progress_old = *progress;
+            }
+            moving.extending = nbt.get("extending") == Some(&Nbt::Byte(1));
+            moving.source = nbt.get("source") == Some(&Nbt::Byte(1));
+        }
+        if let (Some(output), Some(Nbt::Int(saved))) =
+            (&mut entity.comparator, nbt.get("OutputSignal"))
+        {
+            *output = *saved;
+        }
+        if let (Some(hopper), Some(Nbt::Int(saved))) =
+            (&mut entity.hopper, nbt.get("TransferCooldown"))
+        {
+            hopper.cooldown = *saved;
+        }
         entity.stored = Some(nbt);
         entity.modified = false;
         Some((pos, entity))
@@ -184,6 +266,7 @@ impl BlockEntity {
                         "Items" | "front_text" | "back_text" | "is_waxed"
                     ) && !POSITION_KEYS.contains(&k.as_str())
                         && !FURNACE_KEYS.contains(&k.as_str())
+                        && !MODELLED_KEYS.contains(&k.as_str())
                 })
                 .cloned()
                 .collect(),
@@ -236,13 +319,29 @@ impl BlockEntity {
             entries.push(("back_text".into(), back.clone()));
             entries.push(("is_waxed".into(), Nbt::Byte(i8::from(self.waxed))));
         }
+        if let Some(moving) = &self.moving {
+            entries.extend(moving_nbt(moving, data));
+        }
+        if let Some(output) = self.comparator {
+            entries.push(("OutputSignal".into(), Nbt::Int(output)));
+        }
+        if let Some(hopper) = &self.hopper {
+            entries.push(("TransferCooldown".into(), Nbt::Int(hopper.cooldown)));
+        }
         Nbt::Compound(entries)
     }
 
     /// What the client is sent (`BlockEntity.getUpdateTag`): a sign's text,
     /// the saved data of block entities Ferrocraft only keeps, nothing of a
     /// container's items.
-    pub fn update_tag(&self) -> Option<Nbt> {
+    pub fn update_tag(&self, data: &GameData) -> Option<Nbt> {
+        if let Some(moving) = &self.moving {
+            // `saveCustomOnly`: a chunk sent mid-move shows the block moving.
+            return Some(Nbt::Compound(moving_nbt(moving, data)));
+        }
+        if self.comparator.is_some() || self.hopper.is_some() {
+            return None;
+        }
         if let Some([front, back]) = &self.sign {
             return Some(Nbt::Compound(vec![
                 ("front_text".into(), front.clone()),
@@ -309,6 +408,18 @@ impl BlockEntity {
     }
 }
 
+/// What a moving piston's block entity saves (`saveAdditional`); the
+/// progress is the one of the last tick.
+fn moving_nbt(moving: &Moving, data: &GameData) -> Vec<(String, Nbt)> {
+    vec![
+        ("blockState".into(), state_to_nbt(moving.state, data)),
+        ("facing".into(), Nbt::Int(moving.facing as i32)),
+        ("progress".into(), Nbt::Float(moving.progress_old)),
+        ("extending".into(), Nbt::Byte(i8::from(moving.extending))),
+        ("source".into(), Nbt::Byte(i8::from(moving.source))),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use ferrocraft_protocol::packets::play::ComponentPatch;
@@ -334,7 +445,7 @@ mod tests {
         assert_eq!(at, pos);
         assert_eq!(loaded.items, chest.items);
         assert_eq!(
-            loaded.update_tag(),
+            loaded.update_tag(&data),
             None,
             "the client does not see the items"
         );
@@ -346,7 +457,7 @@ mod tests {
         );
         let (_, loaded) = BlockEntity::from_nbt(sign.to_nbt(pos, &data), &data).unwrap();
         assert_eq!(loaded.sign, sign.sign);
-        let tag = loaded.update_tag().unwrap();
+        let tag = loaded.update_tag(&data).unwrap();
         assert!(tag.get("front_text").is_some());
 
         // A furnace keeps its fire and what it has cooked.
@@ -375,7 +486,7 @@ mod tests {
         let (_, loaded) = BlockEntity::from_nbt(banner.clone(), &data).unwrap();
         assert_eq!(loaded.to_nbt(BlockPos { x: 0, y: 0, z: 0 }, &data), banner);
         assert_eq!(
-            loaded.update_tag(),
+            loaded.update_tag(&data),
             Some(Nbt::Compound(vec![(
                 "patterns".into(),
                 Nbt::List(Vec::new())
