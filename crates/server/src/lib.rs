@@ -44,6 +44,19 @@ use crate::storage::Storage;
 use crate::world::World;
 use ferrocraft_protocol::codec::BlockPos;
 
+/// What an enchanting table with `bookcases` shelves offers for an item to
+/// a player with `seed` (`EnchantmentMenu.slotsChanged`): the costs, the
+/// enchantment ids shown as clues and their levels.
+pub fn enchanting_offers(
+    data: &GameData,
+    seed: i32,
+    item: &ferrocraft_protocol::packets::play::ItemStack,
+    bookcases: i32,
+) -> ([i32; 3], [i32; 3], [i32; 3]) {
+    let offers = game::enchanting_offers(data, seed, item, bookcases);
+    (offers.costs, offers.clues, offers.levels)
+}
+
 /// Timings that tests want shorter than vanilla's.
 #[derive(Debug, Clone)]
 pub struct Timing {

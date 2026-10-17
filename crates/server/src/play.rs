@@ -131,9 +131,18 @@ pub async fn handle(
     let (fire, air) = saved
         .as_ref()
         .map_or((0, crate::storage::MAX_AIR), |s| (s.fire, s.air));
+    // `Player.enchantmentSeed`: 0 for a new player, as with vanilla; a
+    // saved 0 becomes a random one when loaded.
     let (effects, absorption, enchantment_seed) = saved.as_ref().map_or_else(
-        || (Vec::new(), 0.0, rand::random()),
-        |s| (s.effects.clone(), s.absorption, s.enchantment_seed),
+        || (Vec::new(), 0.0, 0),
+        |s| {
+            let seed = if s.enchantment_seed == 0 {
+                rand::random()
+            } else {
+                s.enchantment_seed
+            };
+            (s.effects.clone(), s.absorption, seed)
+        },
     );
     let experience = saved
         .as_ref()

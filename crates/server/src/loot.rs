@@ -822,6 +822,92 @@ mod tests {
             .collect()
     }
 
+    /// The drops of many rolls with an enchanted tool, summed by item.
+    fn enchanted_drops(
+        data: &GameData,
+        table: &str,
+        tool: &str,
+        enchantment: &str,
+        level: i32,
+        rolls: usize,
+        entity: Option<EntityFacts>,
+    ) -> HashMap<String, i32> {
+        let mut stack = crate::stack::plain(data.item_id(tool).unwrap(), 1);
+        crate::stack::set_enchantments_in(
+            data,
+            &mut stack,
+            "minecraft:enchantments",
+            &[(enchantment.to_owned(), level)],
+        );
+        let air = data.default_state("minecraft:air").unwrap();
+        let state = data
+            .block_named(&table.replace("minecraft:blocks/", "minecraft:"))
+            .map_or(air, |b| b.default);
+        let mut rng = StdRng::seed_from_u64(11);
+        let mut total = HashMap::new();
+        for _ in 0..rolls {
+            let context = Context {
+                data,
+                table: table.to_owned(),
+                state,
+                pos: BlockPos { x: 0, y: 0, z: 0 },
+                tool: Some(&stack),
+                block_at: &|_| air,
+                entity,
+                by_player: true,
+                explosion: None,
+            };
+            for drop in context.drops(&mut rng) {
+                *total
+                    .entry(data.item(drop.item).unwrap().name.clone())
+                    .or_insert(0) += drop.count;
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn enchantments_change_the_loot() {
+        let data = GameData::load().unwrap();
+        // Silk touch keeps the ore.
+        let silk = enchanted_drops(
+            &data,
+            "minecraft:blocks/diamond_ore",
+            "minecraft:diamond_pickaxe",
+            "minecraft:silk_touch",
+            1,
+            1,
+            None,
+        );
+        assert_eq!(silk.get("minecraft:diamond_ore"), Some(&1));
+        // Fortune III: on average 2.2 diamonds (`OreDrops`: 1 + max(0,
+        // n - 1) for n in 0..5).
+        let fortune = enchanted_drops(
+            &data,
+            "minecraft:blocks/diamond_ore",
+            "minecraft:diamond_pickaxe",
+            "minecraft:fortune",
+            3,
+            1000,
+            None,
+        );
+        let diamonds = fortune["minecraft:diamond"];
+        assert!((2000..2400).contains(&diamonds), "{diamonds}");
+        // Looting III: a zombie's rotten flesh goes from one to 2.5 on
+        // average.
+        let looting = enchanted_drops(
+            &data,
+            "minecraft:entities/zombie",
+            "minecraft:diamond_sword",
+            "minecraft:looting",
+            3,
+            1000,
+            Some(EntityFacts::default()),
+        );
+        let flesh = looting["minecraft:rotten_flesh"];
+        assert!((2200..2800).contains(&flesh), "{flesh}");
+    }
+
     #[test]
     fn blocks_drop_like_vanilla() {
         let data = GameData::load().unwrap();

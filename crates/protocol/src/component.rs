@@ -44,6 +44,9 @@ pub trait Registries {
 #[derive(Debug)]
 pub enum Shape {
     VarInt,
+    /// A `VarInt` on the wire, an unsigned byte saved
+    /// (`ExtraCodecs.UNSIGNED_BYTE`), as effect levels are.
+    UnsignedByte,
     Int,
     Float,
     /// A byte on the wire, `0b`/`1b` saved.
@@ -146,7 +149,7 @@ pub const DYE_COLORS: &[&str] = &[
 
 /// `MobEffectInstance.Details`.
 static EFFECT_DETAILS: [Field; 6] = [
-    defaulted("amplifier", Shape::VarInt, Nbt::Int(0)),
+    defaulted("amplifier", Shape::UnsignedByte, Nbt::Byte(0)),
     defaulted("duration", Shape::VarInt, Nbt::Int(0)),
     defaulted("ambient", Shape::Bool, Nbt::Byte(0)),
     defaulted("show_particles", Shape::Bool, Nbt::Byte(1)),
@@ -162,7 +165,7 @@ fn effect_details() -> &'static Shape {
 /// `MobEffectInstance`: the effect, then its details, in one compound.
 pub static EFFECT_INSTANCE: Shape = Shape::Record(&[
     field("id", Shape::Holder("minecraft:mob_effect")),
-    defaulted("amplifier", Shape::VarInt, Nbt::Int(0)),
+    defaulted("amplifier", Shape::UnsignedByte, Nbt::Byte(0)),
     defaulted("duration", Shape::VarInt, Nbt::Int(0)),
     defaulted("ambient", Shape::Bool, Nbt::Byte(0)),
     defaulted("show_particles", Shape::Bool, Nbt::Byte(1)),
@@ -322,6 +325,7 @@ impl Shape {
     pub fn read(&self, buf: &mut &[u8], registries: &dyn Registries) -> Result<Nbt> {
         Ok(match self.resolve() {
             Shape::VarInt => Nbt::Int(VarInt::decode(buf)?.0),
+            Shape::UnsignedByte => Nbt::Byte(VarInt::decode(buf)?.0 as u8 as i8),
             Shape::Int => Nbt::Int(i32::decode(buf)?),
             Shape::Float => Nbt::Float(f32::decode(buf)?),
             Shape::Bool => Nbt::Byte(i8::from(bool::decode(buf)?)),
@@ -391,7 +395,7 @@ impl Shape {
     /// Reads past a value on the wire without looking up registry entries.
     pub fn skip(&self, buf: &mut &[u8]) -> Result<()> {
         match self.resolve() {
-            Shape::VarInt | Shape::Holder(_) | Shape::Enum(_) => {
+            Shape::VarInt | Shape::UnsignedByte | Shape::Holder(_) | Shape::Enum(_) => {
                 VarInt::decode(buf)?;
             }
             Shape::Int => {
@@ -442,6 +446,11 @@ impl Shape {
     pub fn write(&self, value: &Nbt, out: &mut Vec<u8>, registries: &dyn Registries) -> Result<()> {
         match self.resolve() {
             Shape::VarInt => VarInt(int(value)?).encode(out),
+            Shape::UnsignedByte => VarInt(match value {
+                Nbt::Byte(v) => i32::from(*v as u8),
+                other => int(other)?,
+            })
+            .encode(out),
             Shape::Int => int(value)?.encode(out),
             Shape::Float => match value {
                 Nbt::Float(v) => v.encode(out),
@@ -581,7 +590,7 @@ mod tests {
                     "custom_effects".into(),
                     Nbt::List(vec![Nbt::Compound(vec![
                         ("id".into(), Nbt::String("minecraft:slowness".into())),
-                        ("amplifier".into(), Nbt::Int(1)),
+                        ("amplifier".into(), Nbt::Byte(1)),
                         ("duration".into(), Nbt::Int(200)),
                         ("show_icon".into(), Nbt::Byte(1)),
                     ])]),

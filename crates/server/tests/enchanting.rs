@@ -340,3 +340,31 @@ async fn mending_repairs_with_experience() {
     let damage = stack::damage(&data, repaired.stack.0.as_ref().unwrap());
     assert!((495..=499).contains(&damage), "{damage}");
 }
+
+#[tokio::test]
+async fn fire_aspect_sets_a_cow_alight() {
+    let data = GameData::load().unwrap();
+    let cow = data.entity_type("minecraft:cow").unwrap();
+    let addr = start(operators()).await;
+    let (mut alex, _) = join(addr, "Alex", 2).await;
+    run(
+        &mut alex,
+        "give @s wooden_sword[enchantments={fire_aspect:2}]",
+    )
+    .await;
+    run(&mut alex, "summon cow 1.5 -60 0.5").await;
+    let added = read_matching(&mut alex, |a: &AddEntity| a.entity_type == cow).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    alex.send(&Attack {
+        entity_id: added.entity_id,
+    })
+    .await;
+    read_matching(&mut alex, |d: &SetEntityData| {
+        d.entity_id == added.entity_id
+            && d.values
+                .0
+                .iter()
+                .any(|v| v.index == 0 && matches!(v.value, EntityData::Byte(f) if f & 1 != 0))
+    })
+    .await;
+}

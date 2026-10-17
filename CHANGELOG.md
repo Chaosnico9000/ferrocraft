@@ -7,6 +7,89 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
 
 ### Neu
 
+- Item-Komponenten: Ferrocraft beschreibt Vanillas Komponenten
+  (`DataComponents`) einmal als Form, aus der Netzwerkform und
+  Speicherform folgen: Haltbarkeit, Verzauberungen und gespeicherte
+  Verzauberungen, Namen, Beschreibungen, Seltenheit, Reparaturkosten,
+  Tränke mit eigenen Effekten und Farben, Schmorgericht-Effekte,
+  Färbung, Karten-ID, eigene Daten (`custom_data`) und mehr. Items werden
+  wie bei Vanilla gespeichert (`components: {"minecraft:damage": 10, …}`,
+  entfernte als `"!name": {}`), Vanilla-Dateien werden gelesen. Gegen einen
+  Vanilla-Server geprüft: acht Items mit vielen Komponenten werden aus
+  Vanillas Netzwerkform gelesen und genau so gespeichert, wie Vanilla sie
+  speichert (`cargo run --example vanilla_items`).
+- `/give` mit Komponenten (`diamond_sword[enchantments={sharpness:5},damage=10]`,
+  `!komponente` zum Entfernen) über einen SNBT-Parser.
+- Statuseffekte nach `MobEffectInstance` und `LivingEntity`: alle 40
+  Effekte von Vanilla mit Kategorie, Farbe und Attribut-Modifikatoren
+  (ausgelesen mit `scripts/Alchemy.java`), Ablaufen, versteckte schwächere
+  Effekte, die nach einem stärkeren weiterlaufen, Regeneration, Gift (tötet
+  nicht), Verdorrung, Hunger, Sättigung, Sofortheilung und -schaden
+  (Untote umgekehrt), Absorption (goldene Herzen), Gesundheitsschub,
+  Feuerresistenz, Wasseratmung, Resistenz, Eile und Abbaulähmung beim
+  Abbauen, Sprungkraft und sanfter Fall beim Fallschaden, Schweben ohne
+  Rauswurf, Unsichtbarkeit und Leuchten als Flags, Partikel für alle.
+  Effekte gelten für Spieler und Mobs, werden gespeichert, der Client hört
+  `update_mob_effect` und `remove_mob_effect`. `/effect give|clear` mit
+  Vanillas Antworten.
+- Attribute nach `AttributeInstance`: Grundwerte (Spieler aus dem Jar,
+  Mobs aus ihren Typen), Modifikatoren aus Ausrüstung
+  (`attribute_modifiers` nach Slot), Verzauberungen und Effekten, Vanillas
+  Formel; Clients bekommen `update_attributes` für alles, was sie selbst
+  rechnen (Tempo, Abbau, Sprung, Fallhöhe …). Angriffsschaden,
+  Angriffstempo, Rüstung, Härte, Rückstoßresistenz, Maximalgesundheit und
+  Mob-Tempo laufen jetzt darüber.
+- Essen und Trinken über die `consumable`-Komponente: Tränke, Milch (heilt
+  alles), Honigflasche (heilt Gift), goldene und verzauberte goldene Äpfel,
+  verdorbenes Fleisch, Spinnenaugen, Kugelfisch, Chorusfrüchte
+  (teleportieren), Schmorgerichte und unheilvolle Flaschen, mit ihrem
+  Rest (Flasche, Eimer, Schüssel) aus `use_remainder`.
+- Wurf- und Verweiltränke: fliegen wie Schneebälle, Wurftränke wirken im
+  Umkreis von vier Blöcken nach Nähe, Verweiltränke hinterlassen eine Wolke
+  (`AreaEffectCloud`), die schrumpft und ein Viertel der Wirkung gibt.
+  Wasser löscht Feuer, Kerzen, Lagerfeuer und Brennende. Beide werden
+  gespeichert.
+- Getränkte Pfeile (ein Achtel der Wirkung) und Spektralpfeile (Leuchten);
+  Pfeile behalten ihr Item und geben es beim Aufsammeln zurück.
+- Braustand nach `BrewingStandBlockEntity`: Lohenstaub für zwanzig Brauvorgänge,
+  20 Sekunden je Brauvorgang, alle 279 Brau-Rezepte aus Vanillas Daten
+  (26.3 hat sie als `recipe/brewing`), Menü mit Fortschritt und
+  Brennstoff, der Block zeigt die Flaschen, Trichter füllen Reagenz von
+  oben, Flaschen und Brennstoff von der Seite und nehmen unten Flaschen.
+- Verzauberungen aus ihren Daten (`enchantment/*.json`) ausgewertet:
+  Effekt-Komponenten wie `minecraft:damage`, `damage_protection`,
+  `post_attack`, `attributes`, `item_damage`, `knockback`, `ammo_use`,
+  `block_experience`, `repair_with_xp`, `projectile_spawned`,
+  `damage_immunity`, `prevent_equipment_drop` und
+  `prevent_armor_change`, mit ihren Bedingungen (Ziel-Typ, Schadensart,
+  Werkzeug, Zufall nach Stufe) und stufenabhängigen Werten. Damit wirken
+  Schärfe, Bann, Nemesis der Gliederfüßer, alle Schutz-Arten, Haltbarkeit,
+  Effizienz, Wasseraffinität, Atmung, Schwungkraft, Verbrennung,
+  Rückstoß, Stärke, Schlag, Flamme, Unendlichkeit, Reparatur, Dornen,
+  Fluch der Bindung und des Verschwindens. In Loot-Tabellen: Behutsamkeit,
+  Glück (`apply_bonus` mit allen Formeln, `table_bonus`) und Plünderung
+  (`enchanted_count_increase`, `random_chance_with_enchanted_bonus`).
+- Verzauberungstisch nach `EnchantmentMenu`: Bücherregale mit Luft
+  dazwischen, Kosten, Hinweise, Lapis und Stufen, mit Javas
+  Zufallsgenerator (`LegacyRandomSource`) aus dem Verzauberungs-Seed des
+  Spielers. Gegen Vanilla geprüft: Für Schwert, Buch, Bogen, Goldhelm,
+  Spitzhacke und Angel bietet der Tisch bei gleichem Seed genau dasselbe an.
+- Amboss nach `AnvilMenu`: Kombinieren (Stufen erhöhen, unverträgliche
+  Verzauberungen kosten), Reparieren mit Material und zweitem Gegenstand,
+  Umbenennen (`rename_item`), steigende Reparaturkosten, „Zu teuer!“ ab 40,
+  der Amboss nutzt sich ab und zerbricht.
+- Schleifstein nach `GrindstoneMenu`: nimmt Verzauberungen außer Flüchen,
+  verbindet zwei gleiche Gegenstände, gibt Erfahrung.
+- `/enchant` mit Vanillas Prüfungen und Antworten.
+- Erfahrung aus Erzen und anderen Blöcken (`DropExperienceBlock`, Redstone-
+  Erz, Sculk, Spawner); Behutsamkeit verhindert sie.
+- Spielregeln, die bisher nur gespeichert wurden, wirken jetzt:
+  `keep_inventory`, `natural_health_regeneration`, `show_death_messages`,
+  `immediate_respawn` und `reduced_debug_info` (an die Clients),
+  `pvp`, `tnt_explodes` (mit Vanillas Hinweis), `block_drops`,
+  `mob_drops`, `spawn_mobs`, `spawn_monsters`, `send_command_feedback`,
+  `mob_explosion_drop_decay`, `tnt_explosion_drop_decay`.
+
 - Kolben und klebrige Kolben nach Vanillas `PistonBaseBlock` und
   `PistonStructureResolver`: Strom von jeder Seite außer vorn oder in den
   Block darüber (Quasi-Konnektivität), bis zu zwölf Blöcke, Schleim und Honig
@@ -240,6 +323,19 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
   online.
 
 ### Geändert
+
+- Der Test-Client liest jetzt Items mit Komponenten (vorher übersprang er
+  sie still), über die Komponentenformen des Protokoll-Crates.
+- Schaden für Spieler und Mobs läuft durch einen Weg wie Vanillas
+  `actuallyHurt`: Rüstung (aus Attributen, mit Abnutzung, die
+  Schadensresistenz wie bei Netherit beachtet), Resistenz-Effekt,
+  Schutz-Verzauberungen, Absorption.
+- Spieler-gegen-Spieler-Rückstoß kommt mit dem Extra-Rückstoß in einem
+  Paket; Rückstoß beachtet Rückstoßresistenz.
+- Neue Spieler haben wie bei Vanilla den Verzauberungs-Seed 0, gespeichert
+  als `XpSeed`.
+- Ein fehlender Schlüssel in Loot-Bedingungen ließ den Tick-Thread abstürzen;
+  behoben.
 
 - Block-Updates ohne `UPDATE_CLIENTS` erreichen die Clients nicht mehr, wie
   bei Vanilla: so sehen sie Kolbenbewegungen aus dem Block-Event statt aus

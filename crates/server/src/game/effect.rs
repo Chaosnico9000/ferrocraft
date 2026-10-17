@@ -186,7 +186,11 @@ impl EffectInstance {
     fn details(&self) -> Vec<(String, Nbt)> {
         let mut entries = Vec::new();
         if self.amplifier != 0 {
-            entries.push(("amplifier".to_owned(), Nbt::Int(self.amplifier)));
+            // `ExtraCodecs.UNSIGNED_BYTE`.
+            entries.push((
+                "amplifier".to_owned(),
+                Nbt::Byte(self.amplifier as u8 as i8),
+            ));
         }
         if self.duration != 0 {
             entries.push(("duration".to_owned(), Nbt::Int(self.duration)));
@@ -219,9 +223,14 @@ impl EffectInstance {
             _ => default,
         };
         let visible = int("show_particles", 1) != 0;
+        let amplifier = match nbt.get("amplifier") {
+            // Saved unsigned.
+            Some(Nbt::Byte(v)) => i32::from(*v as u8),
+            _ => int("amplifier", 0),
+        };
         Self {
             effect,
-            amplifier: int("amplifier", 0).clamp(0, 255),
+            amplifier: amplifier.clamp(0, 255),
             duration: int("duration", 0),
             ambient: int("ambient", 0) != 0,
             visible,

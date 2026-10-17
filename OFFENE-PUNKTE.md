@@ -15,17 +15,15 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
   Waffen beim Spawnen
 - Mobs schwimmen nicht (sie meiden Wasser nur), Leitern nutzen nur Spinnen;
   Strömung schiebt weder Mobs noch Items, Items treiben nicht auf
-- Braustände (eigenes Menü mit Fortschritt); Trichter lassen Braustände
-  und Komposter aus, Trichterloren fehlen
+- Trichter lassen Komposter aus, Trichterloren fehlen
 - Redstone: Tageslichtsensoren, Zielblöcke, Stolperdrähte, Schienen,
   Notenblöcke, Kupferbirnen schalten, Crafter; Komparatoren lesen keine
   Rahmen, Jukeboxen, Lesepulte, Bienenstöcke und Bücherregale (geben 0)
-- Spender: Feuerkugeln, Schneebälle, Eier, Tränke und Raketen fliegen nicht
-  (sie fallen als Item heraus), keine Rüstung anlegen, Scheren, Boote,
+- Spender: Feuerkugeln, Schneebälle, Eier, Wurftränke und Raketen fliegen
+  nicht (sie fallen als Item heraus), keine Rüstung anlegen, Scheren, Boote,
   Loren, Kürbisse, Glasflaschen; Kolben schieben Spieler nur auf deren
   Client (Server-seitig Mobs, Items, TNT), Schleim lässt nichts springen
-- Pfeile mit der Verzauberung Flamme (es gibt noch keine Verzauberungen);
-  Blitzableiter, Skelettpferde-Fallen, verwandelte Schweine und
+- Blitzableiter, Skelettpferde-Fallen, verwandelte Schweine und
   Dorfbewohner bei Blitzschlag
 - Wachsen: Riesenbäume aus vier Setzlingen (Fichte, Tropenbaum), Mangroven,
   Azaleen, Bienennester an Bäumen; Bambus, Ranken, Kelp, Seetang,
@@ -39,19 +37,23 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
 
 ## Spielmechanik
 
-- Verzauberungen, Amboss, Schleifstein; dadurch auch Behutsamkeit und Glück
-  beim Abbauen
-- Verzauberungen auf Rüstung; Spieler brennen nicht
-- Erfahrung aus Erzen und vom Züchten, Reparieren mit Erfahrung
+- Verzauberungen, die an Fehlendem hängen: Frostläufer (`location_changed`
+  ersetzt Wasser durch Eis), Seelenläufer (`tick`), Dreizack (Treue,
+  Sog, Kanalisierung, Harpune), Armbrust (Mehrfachschuss, Durchschuss,
+  Schnellladen), Angel (Glück des Meeres, Köder), Streitkolben (Dichte,
+  Bresche, Windstoß); Verzauberungen auf Ausrüstung von Mobs, verzauberte
+  Beute (`enchant_randomly`, `enchant_with_levels`)
+- Effekte mit eigenem Verhalten: Böses Omen, Überfall-Omen,
+  Prüfungs-Omen, Held des Dorfes, Befall, Schleimen, Weben, Windgeladen
+  (Wirkung beim Tod); Leuchtfeuer und Aquisitor geben keine Effekte
 - Ersticken in Blöcken, Erfrieren im Pulverschnee, Beerensträucher;
-  Schild, Armbrust, Dreizack;
-  Spektral- und Trankpfeile wirken wie normale
-- Statuseffekte, Tränke
+  Schild, Armbrust, Dreizack
+- Totem der Unsterblichkeit (`death_protection`)
 - Spielregeln, denen Ferrocraft noch nicht folgt (sie werden gesetzt und
-  gespeichert): `keep_inventory`, `natural_health_regeneration`,
-  `show_death_messages`, `spawn_mobs`/`spawn_monsters` (Ferrocraft nimmt
-  dafür `animals`/`monsters` aus der Konfiguration), `tnt_explodes`, `pvp`,
-  `block_drops`, `mob_drops`, `immediate_respawn` u. a.
+  gespeichert): `entity_drops`, `log_admin_commands`, `max_entity_cramming`,
+  `players_sleeping_percentage`, `spawner_blocks_work`, `limited_crafting`
+  und die zu Dingen, die es noch nicht gibt (Portale, Patrouillen,
+  Phantome, Wächter, Raids)
 
 ## Lücken im Vorhandenen
 
@@ -59,17 +61,20 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
   zu bleiben (`copy_components` wird noch nicht ausgewertet)
 - Andere Spieler hören keine Geräusche beim Blocksetzen
 - Shift-Klick legt Rüstung im Inventar nicht in den Rüstungsslot
-- Item-Komponenten werden nur durchgereicht, nicht verstanden (Namen,
-  Verzauberungen, Inhalt)
-- Komponenten werden in Spielerdateien in Netzwerkform gespeichert, nicht wie
-  bei Vanilla als NBT
-- Weitere Befehle: `/effect`, `/weather`, `/data`, `/clone`, …;
-  `/summon` ohne NBT, Ziele nur `@s`, `@a`, `@p`, `@r` und Namen
+- Komponenten ohne Beschreibung in `component.rs` (Bündel- und
+  Behälterinhalt, Banner, Feuerwerk, Bücher, Rüstungsbesatz, Köpfe,
+  Ausrüstbarkeit, Werkzeug- und Essensdaten, Attribut-Modifikatoren am
+  Stack, …) werden nur durchgereicht und in Ferrocrafts eigener Form
+  gespeichert; aus Vanilla-Dateien gehen sie beim Laden verloren
+- Weitere Befehle: `/data`, `/clone`, `/clear`, `/item`, …;
+  `/summon` ohne NBT, Ziele nur `@s`, `@a`, `@p`, `@r`, `@e` und Namen
 - Die Konsole meldet Befehle von Operatoren nicht wie Vanilla an andere
   Operatoren weiter (`log_admin_commands`); kein `op`/`deop`, `whitelist`,
   `ban` (Operatoren stehen in der Konfiguration)
 - Pfeile stecken nicht sichtbar in Spielern; Spielerbewegung geht nicht in
-  den Schwung der Pfeile ein
+  den Schwung der Pfeile und Wurftränke ein
+- Mobs nutzen Unsichtbarkeit nicht (sie sehen unsichtbare Spieler wie
+  sichtbare)
 - Die Bewegungsprüfung kennt keine Fahrzeuge, Elytren und Schwimmen; dass
   ein Client mehr als eine Position pro Client-Tick schickt, wird nicht
   geprüft (`ClientTickEnd`)
@@ -92,6 +97,12 @@ echter Minecraft-Client ließ sich in der Entwicklungsumgebung nicht starten.
 - Wasser und Lava fließen sichtbar, Eimer füllen und leeren (Geräusch,
   Animation); fallender Sand; Knochenmehl-Partikel; Bäume wachsen;
   Redstone-Leitungen leuchten nach Stärke, Verstärker und Lampen schalten
+- Effekte: Symbole und Zeiten im Inventar, Partikel um Spieler und Mobs,
+  goldene Herzen, schnelleres Laufen mit Tempo, Leuchten durch Wände;
+  Tränke trinken, Wurftrank-Spritzer und Verweilwolke; Braustand mit
+  laufendem Fortschritt; Verzauberungstisch mit Hinweisen und
+  Galaktisch-Schrift, Amboss mit Namensfeld und „Zu teuer!“, Schleifstein;
+  Glitzern verzauberter Items, Funken bei Schärfe-Treffern
 - Kolben fahren flüssig aus und ein (Block-Event), Schleim nimmt Blöcke mit;
   Beobachter blinken, Komparatoren leuchten; Trichter und Spender (Pfeile,
   Wasser); Feuer flackert und breitet sich aus, Rauch; Regen und Gewitter,

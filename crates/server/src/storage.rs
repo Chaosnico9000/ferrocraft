@@ -981,7 +981,7 @@ fn saved_slot_to_menu(slot: i8) -> Option<usize> {
 /// that differ from the item's defaults by name, those it lacks as
 /// `"!name": {}`. Components Ferrocraft has no shape for stay in their wire
 /// form under a key vanilla ignores.
-pub(crate) fn item_to_nbt(stack: &ItemStack, data: &GameData) -> Option<Nbt> {
+pub fn item_to_nbt(stack: &ItemStack, data: &GameData) -> Option<Nbt> {
     let id = &data.item(stack.item)?.name;
     let mut entries = vec![
         ("id".to_owned(), Nbt::String(id.clone())),
@@ -1020,7 +1020,7 @@ pub(crate) fn item_to_nbt(stack: &ItemStack, data: &GameData) -> Option<Nbt> {
     Some(Nbt::Compound(entries))
 }
 
-pub(crate) fn item_from_nbt(nbt: &Nbt, data: &GameData) -> Option<ItemStack> {
+pub fn item_from_nbt(nbt: &Nbt, data: &GameData) -> Option<ItemStack> {
     let Some(Nbt::String(id)) = nbt.get("id") else {
         return None;
     };

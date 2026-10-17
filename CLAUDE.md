@@ -152,10 +152,37 @@ Minecraft-Server (Java Edition 26.3) in Rust. Was er kann und der Aufbau stehen 
 - **Tests mit mehreren Entities** dürfen sich nicht auf die Reihenfolge der
   `add_entity` verlassen, und Werte, die im selben Tick kommen
   (`container_set_data`), kommen in Index-Reihenfolge.
-- **Der Test-Client überspringt, was er nicht dekodieren kann**: Items mit
-  Komponenten wie `damage` scheitern beim Dekodieren, und `read_until`
+- **Der Test-Client überspringt, was er nicht dekodieren kann**: `read_until`
   wartet dann still weiter, bis der Keep-Alive die Verbindung beendet (nach
-  30 s). Solche Pakete roh lesen und nur die vorderen Felder prüfen.
+  30 s). Items mit Komponenten liest er über die Formen in
+  `protocol/src/component.rs` (`set_type_names` beim Verbinden); eine
+  Komponente ohne Form dort lässt das ganze Paket scheitern.
+- **Item-Komponenten tragen auf dem Server keine Länge**: nur ihre Form sagt,
+  wo sie enden (`Slot` vs. `UntrustedSlot`). `component.rs` beschreibt jede
+  Komponente einmal; der Wert im Speicher ist die Speicherform von Vanilla
+  (Registry-Einträge als Namen, Felder mit Standardwert weggelassen), daraus
+  entsteht die Netzwerkform. Effektstufen speichert Vanilla als
+  vorzeichenloses Byte (`UNSIGNED_BYTE`), `show_icon` immer. Vor dem
+  Vergleich mit Vanillas Dateien Compounds ohne Reihenfolge vergleichen.
+- **Komponenten aus `items.json` sind JSON**: Zahlen wie
+  `potion_duration_scale` kommen als Double an, nicht als Float
+  (`stack::float` nimmt jede Zahl).
+- **`serde_json::Map` per Index lesen stürzt ab**, wenn der Schlüssel fehlt
+  (`Value` per Index gibt `Null`). Im Tick-Thread beendet das den ganzen
+  Server: in Daten-Interpretern immer `get`.
+- **Verzauberungstisch wie Vanilla**: `java_random.rs` ist Javas
+  `LegacyRandomSource`; neue Spieler haben den Seed 0 (erst nach dem
+  Neuladen einen zufälligen), die Liste kommt aus dem Tag
+  `#in_enchanting_table` in Tag-Reihenfolge. Damit stimmen Kosten und
+  Hinweise mit Vanilla überein (`examples/vanilla_items.rs`).
+- **Brauen ist Daten**: 26.3 hat `recipe/brewing/*.json` (279 Rezepte) statt
+  `PotionBrewing`-Code; Effekte, Tränke und Attribute liest
+  `scripts/Alchemy.java` aus dem Jar.
+- **Vanilla ignoriert Block-Klicks vor `player_loaded`**: wer mit dem
+  Test-Client gegen Vanilla prüft, schickt es nach dem Spawn.
+- **Reihenfolge in Tests**: Effekt-, Attribut- und Erfahrungspakete kommen
+  vor der Antwort auf den Befehl bzw. vor dem neuen Inventar;
+  `read_matching` überspringt, was davor kommt.
 - **Bogen**: Der Client meldet das Loslassen als `player_action`
   RELEASE_USE (6); die Spannzeit zählt der Server selbst. Gezündetes TNT
   trägt die Lunte als Entity-Daten 8 (Int), der Client zählt sie herunter.

@@ -54,6 +54,16 @@ pub use player::{Player, abilities};
 use tracker::Tracker;
 pub use weather::Weather;
 
+/// See [`crate::enchanting_offers`].
+pub fn enchanting_offers(
+    data: &crate::data::GameData,
+    seed: i32,
+    item: &ItemStack,
+    bookcases: i32,
+) -> enchanting::Offers {
+    enchanting::offers(data, seed, Some(item), bookcases)
+}
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};

@@ -14,7 +14,7 @@ geschrieben: keine Vanilla-Klassen, kein JVM-Wrapper.
 | Play | Join, Chunks nachladen beim Laufen, Keep-Alive, Tageszeit | ✅ |
 | Mehrspieler | Andere Spieler sehen (Bewegung, Kopf, Schleichen, Arm, Ausrüstung, Skins), Tab-Liste mit Ping, Chat | ✅ |
 | Spielmodi | Überleben (Abbauzeit nach Werkzeug, Loot-Tabellen, Werkzeugverschleiß, Leben, Fallschaden, Hunger, Essen, Tod und Respawn), Kreativ, Abenteuer, Zuschauer | ✅ |
-| Items | Fallen lassen (Q, Strg+Q, aus dem Inventar), aufsammeln, Mittelklick, Inventar-Klicks wie Vanilla (Ziehen, Shift, Zahlentasten, Doppelklick) | ✅ |
+| Items | Fallen lassen (Q, Strg+Q, aus dem Inventar), aufsammeln, Mittelklick, Inventar-Klicks wie Vanilla (Ziehen, Shift, Zahlentasten, Doppelklick); Item-Komponenten (Haltbarkeit, Verzauberungen, Namen, Tränke, Farben, eigene Daten …) werden verstanden, im Netzwerk wie bei Vanilla gelesen und geschrieben und wie bei Vanilla gespeichert | ✅ |
 | Blöcke | Setzen und abbauen (Türen, Betten, Treppen, Doppelkisten), Türen/Falltüren/Zauntore/Hebel/Knöpfe benutzen, Licht wird neu berechnet; Nachbar- und Form-Updates wie Vanillas `setBlock` (Pflanzen und Fackeln ohne Halt fallen ab), geplante und zufällige Ticks, die einen Neustart überstehen | ✅ |
 | Flüssigkeiten | Wasser und Lava fließen wie bei Vanilla (Stufen, Fallen, Suche nach dem nächsten Loch, neue Quellen zwischen zwei Wasserquellen), Lava und Wasser werden zu Obsidian, Bruchstein und Stein; Eimer schöpfen und gießen aus, Blöcke mit Wasser (`waterlogged`); Sand, Kies, Betonpulver und Ambosse fallen, Betonpulver härtet im Wasser | ✅ |
 | Wachsen | Hacke macht Ackerboden (Schaufel Trampelpfade, Axt entrindet, alles aus Vanillas `block_transformer`-Daten), Weizen, Karotten, Kartoffeln, Rote Bete, Kürbis- und Melonenstiele wachsen nach Licht und Bewässerung, Ackerboden trocknet aus und wird zertrampelt; Setzlinge werden zu Bäumen nach Vanillas Baum-Features (Eiche, große Eiche, Birke, Fichte, Tropenbaum, Akazie, Kirsche, Schwarzeiche und Blasseiche 2×2), Laub ohne Stamm zerfällt, Gras breitet sich aus, Zuckerrohr und Kakteen wachsen; Knochenmehl | ✅ |
@@ -26,13 +26,17 @@ geschrieben: keine Vanilla-Klassen, kein JVM-Wrapper.
 | Öfen | Ofen, Räucherofen, Hochofen: Brennstoffe und Rezepte aus Vanillas Daten, Feuer und Fortschritt im Menü, der Block glüht, Erfahrung beim Herausnehmen | ✅ |
 | Tiere | Kühe, Schweine, Schafe, Hühner: spawnen auf Gras, laufen mit Wegfindung umher, schauen Spieler an, folgen Futter, flüchten nach Treffern, Loot nach Vanillas Tabellen; züchten mit ihrem Futter, Babys wachsen heran und folgen den Eltern (Lämmer in gemischter Farbe); Schafe scheren, Kühe melken, Hühner legen Eier; werden gespeichert | ✅ |
 | Monster | Zombies, Skelette (schießen Pfeile), Creeper (explodieren), Spinnen (klettern, springen): spawnen im Dunkeln wie bei Vanilla, jagen Spieler über Wegfindung, Zombies und Skelette brennen in der Sonne; Schwierigkeitsgrade | ✅ |
-| Kampf | Nahkampf gegen Mobs und Spieler mit Aufladung, kritischen Treffern, Rückstoß, Waffenschaden aus Vanillas Daten; Bogen mit Spannen, kritischen Pfeilen und Aufsammeln; Rüstung schützt und nutzt sich ab | ✅ |
+| Kampf | Nahkampf gegen Mobs und Spieler mit Aufladung, kritischen Treffern, Schwungangriff mit Schwertern, Rückstoß, Schaden aus Attributen (Waffe, Stärke, Schwäche); Bogen mit Spannen, kritischen Pfeilen und Aufsammeln, Spektral- und getränkte Pfeile; Rüstung, Resistenz, Schutz-Verzauberungen und Absorption schützen, Rüstung nutzt sich ab | ✅ |
+| Effekte und Tränke | Alle Statuseffekte von Vanilla mit ihren Attributen (Tempo, Stärke, Eile, Gesundheitsschub …), Regeneration, Gift, Verdorrung, Hunger, Sättigung, Sofortheilung und -schaden, Absorption, Feuer- und Wasseratmungsschutz, Unsichtbarkeit, Leuchten, Partikel; Tränke trinken, werfen (Wurf- und Verweiltränke mit Wolke), Milch heilt, goldene Äpfel, Honig, Spinnenauge & Co. aus Vanillas `consumable`-Daten; `/effect` | ✅ |
+| Brauen | Braustand mit Lohenstaub, Brauzeit und Menü, alle 279 Rezepte aus Vanillas Daten (`recipe/brewing`), Trichter füllen ihn von oben und der Seite und leeren ihn unten | ✅ |
+| Verzauberungen | Alle Verzauberungen aus Vanillas Daten-Definitionen ausgewertet (Schärfe, Bann, Nemesis, Schutz, Feuer-, Explosions-, Schuss- und Federfall-Schutz, Haltbarkeit, Effizienz, Behutsamkeit, Glück, Plünderung, Verbrennung, Rückstoß, Stärke, Schlag, Flamme, Unendlichkeit, Reparatur, Atmung, Wasseraffinität, Dornen, Fluch der Bindung und des Verschwindens …); Verzauberungstisch mit Bücherregalen bietet bei gleichem Seed genau das an, was Vanilla anbietet; Amboss (Kombinieren, Reparieren, Umbenennen, Stufenkosten, Abnutzung), Schleifstein; `/enchant` | ✅ |
 | Explosionen | Creeper und TNT (mit Feuerzeug oder Feuerkugel zünden, Kettenreaktionen): Blöcke nach Explosionsfestigkeit, Schaden und Rückstoß nach Deckung | ✅ |
-| Erfahrung | Kugeln von Mobs und Öfen fliegen zum Spieler, Level wie bei Vanilla, beim Tod fällt ein Teil heraus | ✅ |
-| Befehle | `/list`, `/gamemode`, `/time`, `/tp`, `/give`, `/kill`, `/summon`, `/difficulty`, `/experience` (`/xp`), `/setblock`, `/fill`, `/gamerule` (alle Regeln von Vanilla), `/weather` (alle außer `/list` für Operatoren); Server-Konsole mit `say`, `save-all` und `stop` | ✅ |
+| Erfahrung | Kugeln von Mobs, Öfen, Erzen und dem Schleifstein fliegen zum Spieler, Level wie bei Vanilla, beim Tod fällt ein Teil heraus | ✅ |
+| Befehle | `/list`, `/gamemode`, `/time`, `/tp`, `/give` (auch mit Komponenten wie `diamond_sword[enchantments={sharpness:5}]`), `/kill`, `/summon`, `/difficulty`, `/experience` (`/xp`), `/setblock`, `/fill`, `/gamerule` (alle Regeln von Vanilla), `/weather`, `/effect`, `/enchant` (alle außer `/list` für Operatoren); Server-Konsole mit `say`, `save-all` und `stop` | ✅ |
+| Spielregeln | Gespeichert wie bei Vanilla; befolgt werden u. a. `keep_inventory`, `natural_health_regeneration`, `show_death_messages`, `immediate_respawn`, `reduced_debug_info`, `pvp`, `tnt_explodes`, `block_drops`, `mob_drops`, `spawn_mobs`, `spawn_monsters`, `send_command_feedback`, die Explosions-Regeln, `mob_griefing`, `fire_damage` & Co. | ✅ |
 | Schutz | Bewegungsprüfung wie Vanilla: zu weite Sprünge und Bewegungen in Blöcke werden zurückgesetzt, Schweben im Überlebensmodus trennt die Verbindung (`allow_flight`) | ✅ |
 | Welt | Speichern im Vanilla-Format samt `level.dat`, Spielregeln, Wetter und Entities (auch Pfeile, gezündetes TNT, fallende Blöcke), Vanilla-Welten laden | ✅ |
-| Fehlt | Braustände, Verzauberungen, Armbrust, Schienen, Nether und Ende; alles in [`OFFENE-PUNKTE.md`](OFFENE-PUNKTE.md), auch die geplante Schicht für Fabric- und Forge-Mods | ⏳ |
+| Fehlt | Armbrust, Dreizack, Angeln, Schienen, Leuchtfeuer, Nether und Ende; alles in [`OFFENE-PUNKTE.md`](OFFENE-PUNKTE.md), auch die geplante Schicht für Fabric- und Forge-Mods | ⏳ |
 
 Wer sich verbindet, steht in einer endlosen Superflat-Welt (Grundgestein, zwei
 Lagen Erde, Gras), im Überlebensmodus oder in dem Modus aus `game_mode`, sieht
@@ -79,7 +83,8 @@ Kisteninhalten, Öfen und Schildtexten in
 liegende Items und Erfahrungskugeln in
 `world/dimensions/minecraft/overworld/entities/r.X.Z.mca`, Spieler (Position,
 Blickrichtung, Inventar, Endertruhe, Leben, Erfahrung, Spielmodus, Brennen,
-Luft) in `world/players/data/<uuid>.dat`, Spawn und Weltzeit in `level.dat`
+Luft, Statuseffekte, Absorption, Verzauberungs-Seed) in
+`world/players/data/<uuid>.dat`, Spawn und Weltzeit in `level.dat`
 und `data/minecraft/world_clocks.dat`, Spielregeln in
 `data/minecraft/game_rules.dat`, das Wetter in `data/minecraft/weather.dat`. Ferrocraft schreibt
 nur Chunks, in denen sich etwas geändert hat, alle 5 Minuten, beim Verlassen
@@ -87,8 +92,11 @@ eines Spielers und beim Beenden (Strg+C oder SIGTERM). Entities in Chunks,
 denen kein Spieler näher als 10 Chunks ist, ruhen wie bei Vanilla und kommen
 zurück, wenn jemand auf 8 Chunks herankommt.
 
-Kolben in Bewegung, Komparatoren und Trichter behalten ihren Zustand als
-Block-Entity wie bei Vanilla. Geplante Ticks (fließendes Wasser, Verstärker,
+Kolben in Bewegung, Komparatoren, Trichter und Braustände behalten ihren
+Zustand als Block-Entity wie bei Vanilla. Items speichern ihre Komponenten
+wie Vanilla (`components: {"minecraft:damage": 10, …}`); für die wenigen
+Komponenten, die Ferrocraft nicht beschreibt (Bündel, Banner, Bücher …),
+bleibt ihre Netzwerkform unter einem eigenen Schlüssel erhalten. Geplante Ticks (fließendes Wasser, Verstärker,
 Knöpfe, Feuer) stehen wie bei
 Vanilla als `block_ticks` und `fluid_ticks` im Chunk und laufen nach dem
 Laden weiter, bei Ferrocraft wie bei Vanilla.
@@ -125,21 +133,31 @@ cargo run -p ferrocraft-devtools --bin bot -- 127.0.0.1:25565 --name Admin \
 # Ferrocraft-Welt nach denselben /setblock- und /fill-Befehlen:
 cargo run --release --example compare_worlds -- vanilla/world ferro/world 0 -62 0 47 -55 47
 
+# Item-Komponenten und den Verzauberungstisch gegen einen Vanilla-Server
+# (offline, Konsole liest eine Datei) prüfen: Items mit Komponenten geben
+# lassen und lesen, Vanillas Spielerdatei mit Ferrocrafts Speicherform
+# vergleichen, die Angebote des Tisches für den Seed des Spielers vergleichen.
+cargo run --release --example vanilla_items -- 127.0.0.1:25569 vanilla/console.in vanilla/world
+
 # Daten für eine Version neu erzeugen (Paket-IDs, Registries, Tags, Blöcke,
 # Items, Brennstoffe, Rezepte, Loot-Tabellen, Baum-Features, Werkzeug-
 # Umwandlungen). Braucht Java: Mojangs Datengenerator und
 # scripts/BlockPhysics.java (Härte, Explosionsfestigkeit, Licht, Kollisions-
 # und Umrissformen, Spawnflächen, Redstone-Leiter, feste Seiten, Kolben-
-# Verhalten, Komparator-Lesbarkeit, Brennbarkeit, Klassen je Block)
-# scripts/EntityInfo.java (Größe, Reichweite, Attribute je Entity-Typ) laufen
-# gegen den Vanilla-Jar. Der Server selbst bleibt reines Rust.
+# Verhalten, Komparator-Lesbarkeit, Brennbarkeit, Erfahrung, Klassen je Block),
+# scripts/EntityInfo.java (Größe, Reichweite, Attribute je Entity-Typ) und
+# scripts/Alchemy.java (Statuseffekte, Tränke, Attribute) laufen gegen den
+# Vanilla-Jar. Brau-Rezepte und Verzauberungen sind ohnehin Daten. Der Server
+# selbst bleibt reines Rust.
 scripts/gen-reports.sh 26.3
 ```
 
 ## Aufbau
 
 ```
-crates/protocol   Wire-Typen (VarInt, Strings, UUID, BlockPos), NBT, Chunk-Format,
+crates/protocol   Wire-Typen (VarInt, Strings, UUID, BlockPos), NBT und SNBT,
+                  Chunk-Format, Item-Komponenten (component.rs: eine
+                  Beschreibung je Komponente für Netzwerk und Speicherform),
                   Framing mit Kompression, Verschlüsselung, Pakete je Zustand
 crates/server     Netzwerk (tokio, ein Task pro Verbindung), Status, Login und
                   Mojang-Auth (RSA über aws-lc-rs), Configuration, Play,
@@ -147,16 +165,22 @@ crates/server     Netzwerk (tokio, ein Task pro Verbindung), Status, Login und
                   Mobs mit Wegfindung, Pfeile, Explosionen, Erfahrung, Öfen,
                   Befehle, Konsole; blocks: Block-Updates, Ticks und
                   Block-Events, fluid, falling, growth, redstone, piston,
-                  hopper, dispenser, fire, weather, hazards, movement),
-                  Spielregeln, Welt, Licht, Block-Entities, Rezepte, Loot,
-                  Bäume (tree.rs), Speichern
+                  hopper, dispenser, fire, weather, hazards, movement;
+                  effect, attributes, damage, consume, potion, brewing,
+                  enchant: Verzauberungs-Effekte aus den Daten, enchanting:
+                  Tisch, Amboss, Schleifstein),
+                  Spielregeln, Welt, Licht, Block-Entities, Item-Stacks
+                  (stack.rs), Rezepte, Loot, Bäume (tree.rs), Javas
+                  Zufallszahlen (java_random.rs), Speichern
 crates/devtools   Test-Client, gen-data (Daten aus dem Datengenerator),
                   proxy (Mitschnitt), bot
 data/26.3         Aus Mojangs Datengenerator: packets.json (Paket-IDs),
                   registries.json, tags.json, blocks.json (mit Physik),
                   items.json, entities.json, recipes.json, loot_tables.json,
                   features.json (Bäume, Werkzeug-Umwandlungen), ids.json,
-                  en_us.json (englische Texte für die Konsole)
+                  alchemy.json (Effekte, Tränke, Attribute),
+                  enchantments.json, en_us.json (englische Texte für die
+                  Konsole)
                   (in den Server eingebettet)
 scripts           gen-reports.sh: Daten für eine neue Version erzeugen
 ```
