@@ -306,6 +306,24 @@ pub fn tree(data: &GameData, permission: u8) -> Commands {
         );
         let enchant_targets = t.entities("targets", false, false, vec![enchantment]);
         root.push(t.literal("enchant", false, vec![enchant_targets]));
+
+        // `clear [<targets>] [<item>] [<maxCount>]`.
+        let max_count = t.argument(
+            "maxCount",
+            "brigadier:integer",
+            [&[1u8][..], &0i32.to_be_bytes()].concat(),
+            true,
+            Vec::new(),
+        );
+        let item = t.argument(
+            "item",
+            "minecraft:item_predicate",
+            Vec::new(),
+            true,
+            vec![max_count],
+        );
+        let clear_targets = t.entities("targets", false, true, vec![item]);
+        root.push(t.literal("clear", true, vec![clear_targets]));
     }
     let root = t.add(NodeKind::Root, false, root);
     Commands {
@@ -506,6 +524,7 @@ impl Game {
             ["enchant", target, enchantment, rest @ ..] => {
                 self.enchant_command(sender, target, enchantment, rest)
             }
+            ["clear", rest @ ..] => self.clear_command(sender, rest),
             ["kill", rest @ ..] => {
                 let victims = match rest {
                     [] => self.myself(sender)?,
@@ -1395,6 +1414,113 @@ impl Game {
             many => Ok(text::translate(
                 "commands.enchant.success.multiple",
                 vec![full, text::plain(&many.len().to_string())],
+                None,
+            )),
+        }
+    }
+
+    /// `clear [<targets>] [<item>] [<maxCount>]`: takes items out of
+    /// inventories (`Inventory.clearOrCountMatchingItems`), the crafting
+    /// grid and the hand; a count of 0 only counts.
+    fn clear_command(&mut self, sender: i32, rest: &[&str]) -> Reply {
+        let data = std::sync::Arc::clone(&self.context.data);
+        let players = match rest.first() {
+            None => self.myself(sender)?,
+            Some(target) => self.targets(sender, target),
+        };
+        let matches = |stack: &ItemStack| match rest.get(1) {
+            None | Some(&"*") => true,
+            Some(word) => match word.strip_prefix('#') {
+                Some(tag) => data
+                    .item_tag(&qualify(tag))
+                    .is_some_and(|items| items.contains(&stack.item)),
+                None => {
+                    data.item_id(&qualify(word.split('[').next().unwrap_or(word)))
+                        == Some(stack.item)
+                }
+            },
+        };
+        let max = match rest.get(2) {
+            None => -1,
+            Some(word) => word
+                .parse::<i32>()
+                .ok()
+                .filter(|m| *m >= 0)
+                .ok_or_else(|| error("parsing.int.invalid", vec![text::plain(word)]))?,
+        };
+        let counting = max == 0;
+        let mut total = 0;
+        let mut touched = Vec::new();
+        for &entity in &players {
+            let Some(player) = self.players.get_mut(&entity) else {
+                continue;
+            };
+            let mut left = if max < 0 { i32::MAX } else { max };
+            let mut count = 0;
+            let mut take = |stack: &mut Option<ItemStack>| {
+                let Some(s) = stack.as_mut().filter(|s| matches(s)) else {
+                    return;
+                };
+                if counting {
+                    count += s.count;
+                    return;
+                }
+                let taken = s.count.min(left);
+                s.count -= taken;
+                left -= taken;
+                count += taken;
+                if s.count == 0 {
+                    *stack = None;
+                }
+            };
+            let mut slots: Vec<Option<ItemStack>> = player.inventory.slots().to_vec();
+            for slot in slots.iter_mut().skip(5) {
+                take(slot);
+            }
+            for cell in player.inventory_menu.grid.iter_mut() {
+                take(cell);
+            }
+            take(&mut player.carried);
+            if !counting {
+                let changed: Vec<usize> = (5..slots.len()).collect();
+                self.update_inventory(entity, |inventory| {
+                    for slot in changed {
+                        inventory.set(slot, slots[slot].clone());
+                    }
+                });
+                touched.push(entity);
+            }
+            total += count;
+        }
+        for entity in touched {
+            self.send_menu(entity);
+        }
+        let name = |id| self.display_name(id);
+        match (players.as_slice(), total) {
+            ([one], 0) => Err(error("clear.failed.single", vec![name(*one)])),
+            (many, 0) => Err(error(
+                "clear.failed.multiple",
+                vec![text::plain(&many.len().to_string())],
+            )),
+            ([one], n) => Ok(text::translate(
+                if counting {
+                    "commands.clear.test.single"
+                } else {
+                    "commands.clear.success.single"
+                },
+                vec![text::plain(&n.to_string()), name(*one)],
+                None,
+            )),
+            (many, n) => Ok(text::translate(
+                if counting {
+                    "commands.clear.test.multiple"
+                } else {
+                    "commands.clear.success.multiple"
+                },
+                vec![
+                    text::plain(&n.to_string()),
+                    text::plain(&many.len().to_string()),
+                ],
                 None,
             )),
         }

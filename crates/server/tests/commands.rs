@@ -90,3 +90,37 @@ async fn time_teleport_and_give() {
     let reply = read_matching(&mut alex, |c: &SystemChat| key(c).starts_with("commands")).await;
     assert_eq!(key(&reply), "commands.give.success.single");
 }
+
+#[tokio::test]
+async fn clear_takes_items_away() {
+    let addr = start(operators()).await;
+    let (mut alex, _) = join(addr, "Alex", 2).await;
+    run(&mut alex, "give @s diamond 5").await;
+    run(&mut alex, "give @s stick 2").await;
+    let answer =
+        |c: &SystemChat| key(c).starts_with("commands.clear") || key(c).starts_with("clear.");
+    // Counting only, then two diamonds, then everything else.
+    run(&mut alex, "clear @s diamond 0").await;
+    let counted = read_matching(&mut alex, answer).await;
+    assert_eq!(key(&counted), "commands.clear.test.single");
+    run(&mut alex, "clear @s diamond 2").await;
+    let cleared = read_matching(&mut alex, answer).await;
+    assert_eq!(key(&cleared), "commands.clear.success.single");
+    assert_eq!(
+        cleared.content.get("with").and_then(|w| match w {
+            Nbt::List(with) => with.first().cloned(),
+            _ => None,
+        }),
+        Some(Nbt::text("2"))
+    );
+    run(&mut alex, "clear").await;
+    let all = read_matching(&mut alex, answer).await;
+    assert!(
+        format!("{:?}", all.content).contains("\"5\""),
+        "{:?}",
+        all.content
+    );
+    run(&mut alex, "clear").await;
+    let none = read_matching(&mut alex, answer).await;
+    assert_eq!(key(&none), "clear.failed.single");
+}

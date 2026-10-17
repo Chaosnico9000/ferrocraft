@@ -66,7 +66,7 @@ Was Ferrocraft noch fehlt, grob nach Reihenfolge. Was erledigt ist, steht im
   Ausrüstbarkeit, Werkzeug- und Essensdaten, Attribut-Modifikatoren am
   Stack, …) werden nur durchgereicht und in Ferrocrafts eigener Form
   gespeichert; aus Vanilla-Dateien gehen sie beim Laden verloren
-- Weitere Befehle: `/data`, `/clone`, `/clear`, `/item`, …;
+- Weitere Befehle: `/data`, `/clone`, `/item`, …;
   `/summon` ohne NBT, Ziele nur `@s`, `@a`, `@p`, `@r`, `@e` und Namen
 - Die Konsole meldet Befehle von Operatoren nicht wie Vanilla an andere
   Operatoren weiter (`log_admin_commands`); kein `op`/`deop`, `whitelist`,

@@ -80,7 +80,8 @@ Alle nennenswerten Änderungen an Ferrocraft. Format nach
   der Amboss nutzt sich ab und zerbricht.
 - Schleifstein nach `GrindstoneMenu`: nimmt Verzauberungen außer Flüchen,
   verbindet zwei gleiche Gegenstände, gibt Erfahrung.
-- `/enchant` mit Vanillas Prüfungen und Antworten.
+- `/enchant` mit Vanillas Prüfungen und Antworten; `/clear [Ziele] [Item] [Anzahl]`
+  (Anzahl 0 zählt nur).
 - Erfahrung aus Erzen und anderen Blöcken (`DropExperienceBlock`, Redstone-
   Erz, Sculk, Spawner); Behutsamkeit verhindert sie.
 - Spielregeln, die bisher nur gespeichert wurden, wirken jetzt:
