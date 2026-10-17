@@ -180,6 +180,7 @@ impl Game {
             match kind.as_str() {
                 "minecraft:piston" => self.tick_moving(pos),
                 "minecraft:hopper" => self.tick_hopper(pos),
+                "minecraft:brewing_stand" => self.tick_brewing(pos),
                 _ => self.tick_furnace(pos),
             }
         }
@@ -207,7 +208,7 @@ impl Game {
             }
         }
         if let Some(bucket) = outcome.remainder {
-            self.pop_resource(pos, bucket);
+            self.drop_at_block(pos, bucket);
         }
         if outcome.changed {
             self.refresh_viewers(pos);
@@ -216,7 +217,7 @@ impl Game {
     }
 
     /// The screens of everyone looking into the container at `pos`.
-    fn refresh_viewers(&mut self, pos: BlockPos) {
+    pub(super) fn refresh_viewers(&mut self, pos: BlockPos) {
         let viewers: Vec<i32> = self
             .players
             .values()
@@ -241,7 +242,10 @@ impl Game {
             let Some(entity) = world.block_entity(pos) else {
                 continue;
             };
-            let now = screen_data(&entity);
+            let now = match &entity.brewing {
+                Some(b) => super::brewing::screen_data(b),
+                None => screen_data(&entity),
+            };
             for (index, value) in now.iter().enumerate() {
                 if menu.sent_data.get(index) == Some(value) {
                     continue;

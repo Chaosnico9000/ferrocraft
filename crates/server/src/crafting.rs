@@ -72,10 +72,30 @@ pub struct Cooking {
     pub time: i32,
 }
 
+/// What one side of a brewing recipe takes (`PotionIngredient`): any of the
+/// items, and for potions only these (names or `#tags` of
+/// `minecraft:potion`).
+#[derive(Debug, Clone)]
+pub struct PotionIngredient {
+    pub items: Ingredient,
+    pub potions: Option<Vec<String>>,
+}
+
+/// A brewing recipe: a bottle and a reagent make a new bottle.
+#[derive(Debug, Clone)]
+pub struct Brewing {
+    pub input: PotionIngredient,
+    pub reagent: PotionIngredient,
+    pub output: i32,
+    /// The output's components as the data pack has them.
+    pub components: serde_json::Map<String, serde_json::Value>,
+}
+
 #[derive(Debug, Default)]
 pub struct Recipes {
     recipes: Vec<Recipe>,
     cooking: Vec<Cooking>,
+    pub brewing: Vec<Brewing>,
 }
 
 #[derive(Deserialize)]
@@ -118,6 +138,31 @@ enum RawRecipe {
     Blasting(RawCooking),
     #[serde(rename = "minecraft:campfire_cooking")]
     Campfire(RawCooking),
+    #[serde(rename = "minecraft:brewing")]
+    Brewing {
+        input: RawPotionIngredient,
+        reagent: RawPotionIngredient,
+        output: RawTemplate,
+    },
+}
+
+#[derive(Deserialize)]
+struct RawPotionIngredient {
+    item: RawIngredient,
+    potion_contents: Option<RawPotions>,
+}
+
+#[derive(Deserialize)]
+struct RawPotions {
+    potions: Option<RawIngredient>,
+}
+
+/// `ItemStackTemplate`.
+#[derive(Deserialize)]
+struct RawTemplate {
+    id: String,
+    #[serde(default)]
+    components: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -167,6 +212,20 @@ impl Recipes {
         };
         let mut recipes = Vec::new();
         let mut cooking = Vec::new();
+        let mut brewing = Vec::new();
+        let potion_ingredient = |raw: &RawPotionIngredient| {
+            Some(PotionIngredient {
+                items: ingredient(&raw.item)?,
+                potions: raw
+                    .potion_contents
+                    .as_ref()
+                    .and_then(|p| p.potions.as_ref())
+                    .map(|p| match p {
+                        RawIngredient::One(name) => vec![name.clone()],
+                        RawIngredient::Many(names) => names.clone(),
+                    }),
+            })
+        };
         let mut names: Vec<_> = raw.into_iter().collect();
         // A stable order, so that the same grid always gives the same result.
         names.sort_by(|a, b| a.0.cmp(&b.0));
@@ -196,6 +255,21 @@ impl Recipes {
                 }
                 RawRecipe::Campfire(raw) => {
                     cooking.extend(cook(Cooker::Campfire, raw));
+                    continue;
+                }
+                RawRecipe::Brewing {
+                    input,
+                    reagent,
+                    output,
+                } => {
+                    brewing.extend((|| {
+                        Some(Brewing {
+                            input: potion_ingredient(&input)?,
+                            reagent: potion_ingredient(&reagent)?,
+                            output: item(&output.id)?,
+                            components: output.components,
+                        })
+                    })());
                     continue;
                 }
                 RawRecipe::Shaped {
@@ -234,7 +308,11 @@ impl Recipes {
             };
             recipes.extend(parsed);
         }
-        Ok(Self { recipes, cooking })
+        Ok(Self {
+            recipes,
+            cooking,
+            brewing,
+        })
     }
 
     /// The cooking recipe for an item in a cooker, the first by name.

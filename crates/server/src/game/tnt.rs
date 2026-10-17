@@ -101,6 +101,9 @@ impl Game {
     /// `TntBlock.prime`: lit TNT where the block was, hopping up in a
     /// random direction.
     pub(super) fn prime_tnt(&mut self, pos: BlockPos, owner: Option<i32>, fuse: i32) {
+        if !self.rules.flag("tnt_explodes") {
+            return;
+        }
         let at = [
             f64::from(pos.x) + 0.5,
             f64::from(pos.y),
@@ -171,6 +174,20 @@ impl Game {
         }
         let creative = player.game_mode() == GameMode::Creative;
         let fire_charge = held == Some("minecraft:fire_charge");
+        if !self.rules.flag("tnt_explodes") {
+            // `TntBlock.useItemOn`: the player is told why nothing happens.
+            player.send(Outbound::Packet(Arc::new(Encoded::new(
+                &ferrocraft_protocol::packets::play::SystemChat {
+                    content: ferrocraft_protocol::packets::play::text::translate(
+                        "block.minecraft.tnt.disabled",
+                        Vec::new(),
+                        None,
+                    ),
+                    overlay: true,
+                },
+            ))));
+            return false;
+        }
         self.set_block(click.pos, self.air);
         self.prime_tnt(click.pos, Some(entity_id), DEFAULT_FUSE);
         self.swing(entity_id);
@@ -321,6 +338,10 @@ impl Game {
             let (pos, owner) = (tnt.pos, tnt.owner);
             self.tnts.remove(&entity_id);
             self.broadcast(None, &Outbound::EntityRemoved(entity_id));
+            // `PrimedTnt.explode`: only where TNT may explode.
+            if !self.rules.flag("tnt_explodes") {
+                return;
+            }
             self.explode(Blast {
                 // `getY(0.0625)`: a little above its bottom.
                 center: [pos[0], pos[1] + HEIGHT * 0.0625, pos[2]],
@@ -328,7 +349,7 @@ impl Game {
                 source: Some(entity_id),
                 attacker: owner,
                 breaks_blocks: true,
-                decay: false,
+                decay: self.rules.flag("tnt_explosion_drop_decay"),
             });
             return;
         }

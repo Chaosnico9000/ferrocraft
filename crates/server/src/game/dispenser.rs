@@ -212,6 +212,9 @@ impl Game {
                     Outcome::Failed(stack)
                 }
             }
+            "minecraft:tnt" if !self.rules.flag("tnt_explodes") => {
+                return self.throw_out(pos, facing, stack);
+            }
             "minecraft:tnt" => {
                 self.prime_tnt(target, None, super::tnt::DEFAULT_FUSE);
                 let count = stack.count - 1;
@@ -256,6 +259,11 @@ impl Game {
             base_damage: 2.0,
             crit: false,
             pickup: Pickup::Allowed,
+            item: ItemStack {
+                count: 1,
+                ..stack.clone()
+            },
+            weapon: None,
         });
         self.level_event(SHOT, pos, 0);
         self.level_event(SMOKE, pos, facing as i32);
@@ -305,7 +313,7 @@ impl Game {
             let on = self.with(state, "lit", "true");
             self.set_block(target, on);
             true
-        } else if self.kind(state) == Kind::Tnt {
+        } else if self.kind(state) == Kind::Tnt && self.rules.flag("tnt_explodes") {
             self.remove_block_keeping_fluid(target);
             self.prime_tnt(target, None, super::tnt::DEFAULT_FUSE);
             true

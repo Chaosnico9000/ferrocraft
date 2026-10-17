@@ -138,7 +138,8 @@ impl Game {
         );
     }
 
-    /// The shared flags and air of a player to their own client, which
+    /// The shared flags, air, golden hearts and effect particles of a
+    /// player to their own client, which
     /// draws flames and bubbles from them.
     pub(super) fn send_own_data(&self, entity_id: i32) {
         let Some(player) = self.players.get(&entity_id) else {
@@ -147,7 +148,16 @@ impl Game {
         let values = player
             .changeable_data()
             .into_iter()
-            .filter(|v| matches!(v.index, data_index::SHARED_FLAGS | data_index::AIR_SUPPLY))
+            .filter(|v| {
+                matches!(
+                    v.index,
+                    data_index::SHARED_FLAGS
+                        | data_index::AIR_SUPPLY
+                        | data_index::ABSORPTION
+                        | data_index::EFFECT_PARTICLES
+                        | data_index::EFFECT_AMBIENCE
+                )
+            })
             .collect();
         player.send(Outbound::Packet(Arc::new(Encoded::new(&SetEntityData {
             entity_id,
@@ -180,6 +190,12 @@ impl Game {
             y: (pos[1] - 0.2).floor() as i32,
             z: pos[2].floor() as i32,
         });
+        let target = super::effect::Living::Player(entity_id);
+        // `MobEffectUtil.hasWaterBreathing`.
+        let water_breathing = self.has_effect(target, "minecraft:water_breathing")
+            || self.has_effect(target, "minecraft:conduit_power")
+            || self.has_effect(target, "minecraft:breath_of_the_nautilus");
+        let oxygen_bonus = self.attribute(target, "minecraft:oxygen_bonus");
         let eyes_in_water = self.eyes_in_water(eyes);
         let mut rng = rand::rng();
         let mut hurts: Vec<(f32, &str, &str)> = Vec::new();
@@ -193,9 +209,12 @@ impl Game {
             }
             player.fire -= 1;
         }
-        // `LivingEntity.baseTick`: air under water.
-        if eyes_in_water && !creative {
-            player.air -= 1;
+        // `LivingEntity.baseTick`: air under water; respiration
+        // (`decreaseAirSupply`) often spares it.
+        if eyes_in_water && !creative && !water_breathing {
+            if oxygen_bonus <= 0.0 || rng.random::<f64>() < 1.0 / (oxygen_bonus + 1.0) {
+                player.air -= 1;
+            }
             if player.air <= -20 {
                 player.air = 0;
                 let event = Encoded::new(&EntityEvent {
@@ -287,7 +306,11 @@ impl Game {
             "minecraft:can_breathe_under_water",
             type_id,
         );
-        let eyes_in_water = !breathes_water && self.eyes_in_water(eyes);
+        let target = super::effect::Living::Mob(entity_id);
+        let water_breathing = self.has_effect(target, "minecraft:water_breathing")
+            || self.has_effect(target, "minecraft:conduit_power")
+            || self.has_effect(target, "minecraft:breath_of_the_nautilus");
+        let eyes_in_water = !breathes_water && !water_breathing && self.eyes_in_water(eyes);
         let mut hurts: Vec<(f32, &str)> = Vec::new();
         let Some(mob) = self.mobs.get_mut(&entity_id) else {
             return;
@@ -342,7 +365,6 @@ impl Game {
     /// resist fire like netherite.
     pub(super) fn tick_item_hazards(&mut self) {
         let data = Arc::clone(&self.context.data);
-        let resistant = data.data_component_type("minecraft:damage_resistant").ok();
         let doomed: Vec<(i32, [f64; 3], bool)> = self
             .items
             .values()
@@ -352,12 +374,9 @@ impl Game {
                 if !burns && !inside.cactus {
                     return None;
                 }
-                let fireproof = resistant.is_some_and(|t| {
-                    item.stack.patch.added.iter().any(|(c, _)| *c == t)
-                        || data
-                            .item(item.stack.item)
-                            .is_some_and(|i| i.name.starts_with("minecraft:netherite"))
-                });
+                // `damage_resistant` against `#is_fire`.
+                let fireproof =
+                    crate::stack::get(&data, &item.stack, "minecraft:damage_resistant").is_some();
                 if burns && fireproof && !inside.cactus {
                     return None;
                 }

@@ -94,10 +94,16 @@ impl Game {
     /// One round of the spawner.
     pub(in crate::game) fn spawn_mobs(&mut self) {
         let mut categories = Vec::new();
-        if self.context.monsters && self.context.difficulty > 0 {
+        // `spawn_mobs` and `spawn_monsters`, besides the configuration.
+        let mobs = self.rules.flag("spawn_mobs");
+        if self.context.monsters
+            && mobs
+            && self.rules.flag("spawn_monsters")
+            && self.context.difficulty > 0
+        {
             categories.push(Category::Monster);
         }
-        if self.context.animals && self.tick.is_multiple_of(400) {
+        if self.context.animals && mobs && self.tick.is_multiple_of(400) {
             categories.push(Category::Creature);
         }
         if categories.is_empty() {

@@ -87,6 +87,36 @@ pub struct Moving {
     pub last_ticked: i64,
 }
 
+/// A brewing stand's brew and fuel (`BrewingStandBlockEntity`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Brewing {
+    /// Ticks left of the brew, 0 while idle.
+    pub brew_time: i32,
+    pub total_brew_time: i32,
+    /// Brews left of the blaze powder burning.
+    pub fuel: i32,
+    pub total_fuel: i32,
+    pub speed: f32,
+    /// The reagent the brew started with.
+    pub ingredient: Option<i32>,
+    /// Which bottle places the block shows filled.
+    pub bottles: Option<[bool; 3]>,
+}
+
+impl Default for Brewing {
+    fn default() -> Self {
+        Self {
+            brew_time: 0,
+            total_brew_time: 400,
+            fuel: 0,
+            total_fuel: 20,
+            speed: 1.0,
+            ingredient: None,
+            bottles: None,
+        }
+    }
+}
+
 /// A hopper's wait before it moves the next item (`TransferCooldown`) and
 /// the tick it last ran in.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -105,6 +135,15 @@ const MODELLED_KEYS: [&str; 7] = [
     "source",
     "OutputSignal",
     "TransferCooldown",
+];
+
+/// Keys of a brewing stand's saved data.
+const BREWING_KEYS: [&str; 5] = [
+    "BrewTime",
+    "total_brew_time",
+    "Fuel",
+    "total_fuel",
+    "speed_multiplier",
 ];
 
 /// Keys of a furnace's saved data.
@@ -135,6 +174,7 @@ pub struct BlockEntity {
     /// A comparator's output (`OutputSignal`).
     pub comparator: Option<i32>,
     pub hopper: Option<Hopper>,
+    pub brewing: Option<Brewing>,
     /// As loaded, for everything Ferrocraft does not model.
     stored: Option<Nbt>,
     /// Changed since it was loaded.
@@ -163,6 +203,7 @@ impl BlockEntity {
                 cooldown: -1,
                 ticked: 0,
             }),
+            brewing: (kind == "minecraft:brewing_stand").then(Brewing::default),
             stored: None,
             modified: true,
         }
@@ -247,6 +288,24 @@ impl BlockEntity {
         {
             hopper.cooldown = *saved;
         }
+        if let Some(brewing) = &mut entity.brewing {
+            let int = |key, default| match nbt.get(key) {
+                Some(Nbt::Int(v)) => *v,
+                Some(Nbt::Short(v)) => i32::from(*v),
+                Some(Nbt::Byte(v)) => i32::from(*v),
+                _ => default,
+            };
+            brewing.brew_time = int("BrewTime", 0);
+            brewing.total_brew_time = int("total_brew_time", 400);
+            brewing.fuel = int("Fuel", 0);
+            brewing.total_fuel = int("total_fuel", 20);
+            if let Some(Nbt::Float(speed)) = nbt.get("speed_multiplier") {
+                brewing.speed = *speed;
+            }
+            if brewing.brew_time > 0 {
+                brewing.ingredient = entity.items[3].as_ref().map(|s| s.item);
+            }
+        }
         entity.stored = Some(nbt);
         entity.modified = false;
         Some((pos, entity))
@@ -266,6 +325,7 @@ impl BlockEntity {
                         "Items" | "front_text" | "back_text" | "is_waxed"
                     ) && !POSITION_KEYS.contains(&k.as_str())
                         && !FURNACE_KEYS.contains(&k.as_str())
+                        && !BREWING_KEYS.contains(&k.as_str())
                         && !MODELLED_KEYS.contains(&k.as_str())
                 })
                 .cloned()
@@ -327,6 +387,13 @@ impl BlockEntity {
         }
         if let Some(hopper) = &self.hopper {
             entries.push(("TransferCooldown".into(), Nbt::Int(hopper.cooldown)));
+        }
+        if let Some(brewing) = &self.brewing {
+            entries.push(("BrewTime".into(), Nbt::Int(brewing.brew_time)));
+            entries.push(("total_brew_time".into(), Nbt::Int(brewing.total_brew_time)));
+            entries.push(("Fuel".into(), Nbt::Int(brewing.fuel)));
+            entries.push(("total_fuel".into(), Nbt::Int(brewing.total_fuel)));
+            entries.push(("speed_multiplier".into(), Nbt::Float(brewing.speed)));
         }
         Nbt::Compound(entries)
     }

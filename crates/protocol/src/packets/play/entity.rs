@@ -115,6 +115,45 @@ pub enum EntityData {
     HumanoidArm(i32),
     /// An item stack, e.g. what an item entity shows.
     Item(super::Slot),
+    /// Particles an entity gives off, such as those of its effects.
+    Particles(Vec<Particle>),
+    /// One particle, such as an effect cloud's.
+    Particle(Particle),
+}
+
+/// Particle types that take a colour (`ColorParticleOption`) in 26.3:
+/// `entity_effect`, `tinted_leaves`, `flash`.
+pub const COLORED_PARTICLES: [i32; 3] = [28, 46, 52];
+
+/// A particle with its options (`ParticleOptions`): only a colour
+/// (`ColorParticleOption`) or none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Particle {
+    /// Network id in `minecraft:particle_type`.
+    pub kind: i32,
+    /// ARGB, for the particles that take a colour.
+    pub color: Option<i32>,
+}
+
+impl Encode for Particle {
+    fn encode(&self, out: &mut Vec<u8>) {
+        VarInt(self.kind).encode(out);
+        if let Some(color) = self.color {
+            color.encode(out);
+        }
+    }
+}
+
+impl Decode for Particle {
+    fn decode(buf: &mut &[u8]) -> Result<Self> {
+        let kind = VarInt::decode(buf)?.0;
+        let color = if COLORED_PARTICLES.contains(&kind) {
+            Some(i32::decode(buf)?)
+        } else {
+            None
+        };
+        Ok(Particle { kind, color })
+    }
 }
 
 impl EntityData {
@@ -128,6 +167,8 @@ impl EntityData {
             EntityData::Pose(_) => 20,
             EntityData::HumanoidArm(_) => 42,
             EntityData::Item(_) => 7,
+            EntityData::Particle(_) => 16,
+            EntityData::Particles(_) => 17,
         }
     }
 }
@@ -149,6 +190,11 @@ pub mod data_index {
     /// `LivingEntity.DATA_LIVING_ENTITY_FLAGS`: 0x01 using an item, 0x02
     /// with the off hand.
     pub const LIVING_ENTITY_FLAGS: u8 = 8;
+    /// `LivingEntity.DATA_EFFECT_PARTICLES` and `DATA_EFFECT_AMBIENCE_ID`.
+    pub const EFFECT_PARTICLES: u8 = 10;
+    pub const EFFECT_AMBIENCE: u8 = 11;
+    /// `Player.DATA_PLAYER_ABSORPTION_ID`: golden hearts.
+    pub const ABSORPTION: u8 = 17;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -182,6 +228,11 @@ impl Encode for EntityDataValues {
                 EntityData::Boolean(v) => v.encode(out),
                 EntityData::Pose(v) => VarInt(*v as i32).encode(out),
                 EntityData::Item(v) => v.encode(out),
+                EntityData::Particles(particles) => {
+                    VarInt(particles.len() as i32).encode(out);
+                    particles.iter().for_each(|p| p.encode(out));
+                }
+                EntityData::Particle(particle) => particle.encode(out),
             }
         }
         255u8.encode(out);
@@ -212,6 +263,12 @@ impl Decode for EntityDataValues {
                 }),
                 42 => EntityData::HumanoidArm(VarInt::decode(buf)?.0),
                 7 => EntityData::Item(super::Slot::decode(buf)?),
+                16 => EntityData::Particle(Particle::decode(buf)?),
+                17 => EntityData::Particles(
+                    (0..crate::codec::decode_count(buf, buf.len())?)
+                        .map(|_| Particle::decode(buf))
+                        .collect::<Result<_>>()?,
+                ),
                 _ => return Err(Error::Invalid("unsupported entity data serializer")),
             };
             values.push(EntityDataValue { index, value });

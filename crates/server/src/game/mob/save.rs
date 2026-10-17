@@ -142,7 +142,7 @@ impl Mob {
             ("Health".into(), Nbt::Float(self.health)),
             ("HurtTime".into(), Nbt::Short(0)),
             ("DeathTime".into(), Nbt::Short(0)),
-            ("AbsorptionAmount".into(), Nbt::Float(0.0)),
+            ("AbsorptionAmount".into(), Nbt::Float(self.absorption)),
             ("FallFlying".into(), Nbt::Byte(0)),
             ("CanPickUpLoot".into(), Nbt::Byte(0)),
             (
@@ -168,6 +168,9 @@ impl Mob {
             .collect();
         if !equipment.is_empty() {
             entries.push(("equipment".into(), Nbt::Compound(equipment)));
+        }
+        if let Some(effects) = self.effects.to_nbt(data) {
+            entries.push(("active_effects".into(), effects));
         }
         if !self.kind.hostile() {
             // `AgeableMob` and `Animal`.
@@ -197,7 +200,14 @@ impl Mob {
             }
             _ => {}
         }
-        merge(self.stored.as_ref(), entries)
+        let mut nbt = merge(self.stored.as_ref(), entries);
+        // Effects that ran out since loading stay gone.
+        if self.effects.active.is_empty()
+            && let Nbt::Compound(entries) = &mut nbt
+        {
+            entries.retain(|(k, _)| k != "active_effects");
+        }
+        nbt
     }
 
     /// A mob from its saved NBT; `None` for kinds Ferrocraft does not have.
@@ -231,6 +241,12 @@ impl Mob {
         }
         if let Some(Nbt::Short(air)) = nbt.get("Air") {
             mob.air = i32::from(*air);
+        }
+        mob.effects = super::super::effect::Effects::from_nbt(nbt.get("active_effects"), data);
+        if let Some(Nbt::Float(absorption)) = nbt.get("AbsorptionAmount")
+            && absorption.is_finite()
+        {
+            mob.absorption = absorption.max(0.0);
         }
         if let Some(Nbt::Short(fire)) = nbt.get("Fire") {
             mob.fire = i32::from(*fire).max(0);
@@ -394,6 +410,17 @@ impl Game {
                 self.revive_arrow(entity_id, nbt);
                 true
             }
+            Some(Nbt::String(id))
+                if matches!(
+                    id.as_str(),
+                    "minecraft:splash_potion"
+                        | "minecraft:lingering_potion"
+                        | "minecraft:area_effect_cloud"
+                ) =>
+            {
+                self.revive_potion(entity_id, nbt);
+                true
+            }
             Some(Nbt::String(id)) if id == "minecraft:tnt" => {
                 self.revive_tnt(entity_id, nbt);
                 true
@@ -445,6 +472,7 @@ impl Game {
             .arrow_nbt()
             .into_iter()
             .chain(self.tnt_nbt())
+            .chain(self.potion_nbt())
             .chain(self.falling_nbt());
         for (pos, nbt) in flying {
             chunks.entry(chunk_of(pos)).or_default().push(nbt);

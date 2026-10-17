@@ -6,10 +6,12 @@
 
 pub mod chunk;
 pub mod codec;
+pub mod component;
 pub mod crypt;
 pub mod frame;
 pub mod nbt;
 pub mod packets;
+pub mod snbt;
 
 pub use codec::{Decode, Encode, Error, VarInt};
 pub use nbt::Nbt;

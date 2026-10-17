@@ -5,14 +5,16 @@
 use std::sync::Arc;
 
 use ferrocraft_protocol::Nbt;
-use ferrocraft_protocol::codec::{BlockPos, Decode, Encode, VarInt};
+use ferrocraft_protocol::codec::BlockPos;
 use ferrocraft_protocol::packets::play::{
     BlockDestruction, ClientboundContainerClose, DamageEvent, EntityEvent, GameMode, ItemStack,
     LEVEL_EVENT_DESTROY_BLOCK, LevelEvent, LpVec3, PlayerCombatKill, SetEntityMotion, SetHealth,
     SetHeldSlot, SystemChat, equipment_slot, text,
 };
+use rand::Rng;
 use tracing::info;
 
+use super::effect::Living;
 use super::player::{Digging, Food, Player, Using};
 use super::{Encoded, Game, Outbound};
 use crate::inventory;
@@ -20,26 +22,12 @@ use crate::loot;
 use crate::storage::MAX_HEALTH;
 use crate::world::chunk_of;
 
-/// `Attributes.SAFE_FALL_DISTANCE`.
-const SAFE_FALL_DISTANCE: f64 = 3.0;
 /// Ticks a player cannot be hurt again after a hit (half of
 /// `invulnerableTime`, which only blocks weaker hits after that).
 const HURT_COOLDOWN: u32 = 10;
 /// `EntityEvent.DEATH` and `EntityEvent.USE_ITEM_COMPLETE`.
 const EVENT_DEATH: u8 = 3;
 const EVENT_USE_ITEM_COMPLETE: u8 = 9;
-/// What stays behind after eating.
-fn use_remainder(item: &str) -> Option<&'static str> {
-    match item {
-        "minecraft:mushroom_stew"
-        | "minecraft:rabbit_stew"
-        | "minecraft:beetroot_soup"
-        | "minecraft:suspicious_stew" => Some("minecraft:bowl"),
-        "minecraft:honey_bottle" => Some("minecraft:glass_bottle"),
-        _ => None,
-    }
-}
-
 /// `BowItem.getUseDuration`: a bow can be held drawn for an hour.
 const BOW_USE_TICKS: u32 = 72000;
 
@@ -53,9 +41,6 @@ pub(super) fn bow_power(ticks: u32) -> f32 {
 fn mortal(mode: GameMode) -> bool {
     matches!(mode, GameMode::Survival | GameMode::Adventure)
 }
-
-/// The armor slots of the inventory menu: head, chest, legs, feet.
-const ARMOR_SLOTS: [usize; 4] = [5, 6, 7, 8];
 
 /// Damage to a player and where it came from.
 pub(super) struct Hit<'a> {
@@ -95,6 +80,22 @@ impl Game {
                 .and_then(|r| r.speed)
                 .unwrap_or(tool.default_mining_speed)
         });
+        // `Player.getDestroySpeed`: efficiency, haste, mining fatigue, the
+        // attributes.
+        let target = Living::Player(player.entity_id);
+        if speed > 1.0 {
+            speed += self.attribute(target, "minecraft:mining_efficiency") as f32;
+        }
+        let haste = self
+            .effect_level(target, "minecraft:haste")
+            .max(self.effect_level(target, "minecraft:conduit_power"));
+        if let Some(level) = haste {
+            speed *= 1.0 + (level + 1) as f32 * 0.2;
+        }
+        if let Some(level) = self.effect_level(target, "minecraft:mining_fatigue") {
+            speed *= 0.3f32.powi(level + 1);
+        }
+        speed *= self.attribute(target, "minecraft:block_break_speed") as f32;
         let eyes = player.eyes();
         let eye_block = BlockPos {
             x: eyes[0].floor() as i32,
@@ -102,8 +103,7 @@ impl Game {
             z: eyes[2].floor() as i32,
         };
         if data.physics(self.context.world.block(eye_block)).fluid == 1 {
-            // `Attributes.SUBMERGED_MINING_SPEED`.
-            speed *= 0.2;
+            speed *= self.attribute(target, "minecraft:submerged_mining_speed") as f32;
         }
         if !player.on_ground {
             speed /= 5.0;
@@ -311,9 +311,22 @@ impl Game {
             .data
             .block_of(state)
             .map_or(0.0, |(_, b)| b.hardness);
+        let experience = if harvests {
+            self.block_experience_for(state, tool.as_ref())
+        } else {
+            0
+        };
         let changed = self.break_block(pos, Some(entity_id));
         for (at, stack) in drops {
             self.pop_resource(at, stack);
+        }
+        if experience > 0 && self.rules.flag("block_drops") {
+            let centre = [
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 0.5,
+                f64::from(pos.z) + 0.5,
+            ];
+            self.award_experience(centre, experience);
         }
         self.exhaust(entity_id, 0.005);
         let per_block = tool
@@ -330,6 +343,32 @@ impl Game {
         changed
     }
 
+    /// `spawnAfterBreak`: the experience a block gives, less what silk
+    /// touch takes (`tryDropExperience`).
+    fn block_experience_for(&self, state: u32, tool: Option<&ItemStack>) -> i32 {
+        let data = &self.context.data;
+        let Some((_, block)) = data.block_of(state) else {
+            return 0;
+        };
+        let mut rng = rand::rng();
+        let amount = match block.xp {
+            Some([min, max]) => rng.random_range(min..=max.max(min)),
+            // Blocks that pick it in code rather than from a range.
+            None if block.is("RedStoneOreBlock") => rng.random_range(1..=5),
+            None if block.is("SculkSensorBlock")
+                || block.is("SculkShriekerBlock")
+                || block.is("SculkCatalystBlock") =>
+            {
+                5
+            }
+            None if block.is("SpawnerBlock") => {
+                return 15 + rng.random_range(0..15) + rng.random_range(0..15);
+            }
+            None => return 0,
+        };
+        tool.map_or(amount, |tool| self.block_experience(tool, amount))
+    }
+
     /// `ItemStack.hurtAndBreak`: `amount` more points of `minecraft:damage`
     /// for the item in a slot; at `max_damage` it breaks.
     pub(super) fn wear(&mut self, entity_id: i32, slot: usize, amount: i32) {
@@ -342,6 +381,11 @@ impl Game {
         let Some(stack) = player.inventory.get(slot).cloned() else {
             return;
         };
+        // `processDurabilityChange`: unbreaking spares some of it.
+        let amount = self.durability_change(&stack, amount);
+        if amount == 0 {
+            return;
+        }
         let Some(worn) = self.worn(stack, amount) else {
             return;
         };
@@ -363,23 +407,14 @@ impl Game {
     /// `None` if it takes no damage.
     pub(super) fn worn(&self, mut stack: ItemStack, amount: i32) -> Option<Option<ItemStack>> {
         let data = &self.context.data;
-        let damage_type = data.data_component_type("minecraft:damage").ok()?;
-        let max_damage = data.item(stack.item).and_then(|i| i.max_damage)?;
-        let current = stack
-            .patch
-            .added
-            .iter()
-            .find(|(t, _)| *t == damage_type)
-            .and_then(|(_, bytes)| VarInt::decode(&mut bytes.as_slice()).ok())
-            .map_or(0, |v| v.0);
-        let damage = current + amount;
-        if damage >= max_damage {
+        if !crate::stack::damageable(data, &stack) {
+            return None;
+        }
+        let damage = crate::stack::damage(data, &stack) + amount;
+        if damage >= crate::stack::max_damage(data, &stack) {
             return Some(None);
         }
-        let mut bytes = Vec::new();
-        VarInt(damage).encode(&mut bytes);
-        stack.patch.added.retain(|(t, _)| *t != damage_type);
-        stack.patch.added.push((damage_type, bytes));
+        crate::stack::set(data, &mut stack, "minecraft:damage", &Nbt::Int(damage));
         Some(Some(stack))
     }
 
@@ -452,6 +487,12 @@ impl Game {
         was_on_ground: bool,
         on_ground: bool,
     ) {
+        let target = Living::Player(entity_id);
+        // `LivingEntity.aiStep`: slow falling and levitation forget the fall.
+        let gliding = self.has_effect(target, "minecraft:slow_falling")
+            || self.has_effect(target, "minecraft:levitation");
+        let safe_fall = self.attribute(target, "minecraft:safe_fall_distance");
+        let fall_multiplier = self.attribute(target, "minecraft:fall_damage_multiplier");
         let data = &self.context.data;
         let world = &self.context.world;
         let Some(player) = self.players.get_mut(&entity_id) else {
@@ -483,7 +524,7 @@ impl Game {
 
         let mut damage = 0.0;
         let mut landed = None;
-        if !mortal(player.game_mode()) || player.flying || in_water || climbing {
+        if !mortal(player.game_mode()) || player.flying || in_water || climbing || gliding {
             player.fall_distance = 0.0;
         } else {
             if delta[1] < 0.0 {
@@ -505,8 +546,10 @@ impl Game {
                     Some(name) if name.ends_with("_bed") => 0.5,
                     _ => 1.0,
                 };
+                // `calculateFallDamage`.
                 damage =
-                    ((player.fall_distance + 1.0e-6 - SAFE_FALL_DISTANCE) * multiplier).floor();
+                    ((player.fall_distance + 1.0e-6 - safe_fall) * multiplier * fall_multiplier)
+                        .floor();
                 if player.fall_distance > 0.0 {
                     landed = Some((below, player.fall_distance));
                 }
@@ -565,11 +608,6 @@ impl Game {
             .registry_id("minecraft:damage_type", hit.damage_type)
             .unwrap_or(0);
         let bypasses = hit.damage_type == "minecraft:generic_kill";
-        let armored = !data.tag_contains(
-            "minecraft:damage_type",
-            "minecraft:bypasses_armor",
-            source_type,
-        );
         // `DamageScaling`: explosions always, the rest when a mob is to
         // blame.
         let by_mob = hit.attacker.is_some_and(|a| !self.players.contains_key(&a));
@@ -584,6 +622,17 @@ impl Game {
         if player.dead || (!bypasses && (!mortal(player.game_mode()) || player.invulnerable > 0)) {
             return false;
         }
+        if self.immune_to(Living::Player(entity_id), hit.damage_type) {
+            return false;
+        }
+        // `Player.canHarmPlayer`: other players only with `pvp`.
+        if hit
+            .attacker
+            .is_some_and(|a| a != entity_id && self.players.contains_key(&a))
+            && !self.rules.flag("pvp")
+        {
+            return false;
+        }
         let mut amount = hit.amount;
         if scales {
             amount = match difficulty {
@@ -596,23 +645,13 @@ impl Game {
         if amount <= 0.0 {
             return false;
         }
-        let mut wear: Vec<(usize, i32)> = Vec::new();
-        if armored {
-            // `LivingEntity.hurtArmor`: a point per four of the damage on
-            // each piece, then `CombatRules.getDamageAfterAbsorb`.
-            let points = (amount / 4.0).max(1.0) as i32;
-            let (mut armor, mut toughness) = (0.0, 0.0);
-            for slot in ARMOR_SLOTS {
-                if let Some(item) = player.inventory.get(slot).and_then(|s| data.item(s.item)) {
-                    armor += item.armor;
-                    toughness += item.armor_toughness;
-                    if item.armor > 0.0 {
-                        wear.push((slot, points));
-                    }
-                }
-            }
-            amount = super::mob::after_armor(amount, armor, toughness);
-        }
+        let amount = self.absorb_damage(
+            Living::Player(entity_id),
+            amount,
+            hit.damage_type,
+            hit.attacker,
+            hit.direct.or(hit.attacker),
+        );
         let Some(player) = self.players.get_mut(&entity_id) else {
             return false;
         };
@@ -647,9 +686,6 @@ impl Game {
         ) {
             self.exhaust(entity_id, 0.1);
         }
-        for (slot, points) in wear {
-            self.wear(entity_id, slot, points);
-        }
         self.send_health(entity_id);
         if dead {
             self.die(entity_id, hit.message);
@@ -681,10 +717,21 @@ impl Game {
         player.data_dirty = true;
         player.state = None;
         info!(name = %player.name(), "died");
+        // `show_death_messages`: without it the death screen says nothing
+        // and nobody hears of it.
+        let show = self.rules.flag("show_death_messages");
+        let keep = self.rules.flag("keep_inventory");
+        let Some(player) = self.players.get_mut(&entity_id) else {
+            return;
+        };
         player.send(Outbound::Packet(Arc::new(Encoded::new(
             &PlayerCombatKill {
                 player_id: entity_id,
-                message: message.clone(),
+                message: if show {
+                    message.clone()
+                } else {
+                    text::plain("")
+                },
             },
         ))));
         let death = Encoded::new(&EntityEvent {
@@ -699,18 +746,27 @@ impl Game {
             .map(|(_, s)| s)
             .collect();
         self.broadcast_entity(entity_id, vec![death]);
-        self.broadcast_packet(
-            None,
-            &SystemChat {
-                content: message,
-                overlay: false,
-            },
-        );
+        if show {
+            self.broadcast_packet(
+                None,
+                &SystemChat {
+                    content: message,
+                    overlay: false,
+                },
+            );
+        }
+        if keep {
+            // `keep_inventory`: everything stays, the experience too.
+            return;
+        }
         self.update_inventory(entity_id, |inventory| {
             *inventory = inventory::Inventory::new(&[], inventory.selected());
         });
+        // `destroyVanishingCursedItems`.
         for stack in stacks {
-            self.scatter_from(entity_id, stack);
+            if !self.has_enchantment_effect(&stack, "minecraft:prevent_equipment_drop") {
+                self.scatter_from(entity_id, stack);
+            }
         }
         self.send_menu(entity_id);
         // `Player.getBaseExperienceReward`: seven points a level, at most a
@@ -741,6 +797,8 @@ impl Game {
         }
         player.dead = false;
         player.health = MAX_HEALTH;
+        player.absorption = 0.0;
+        player.effects = Default::default();
         player.food = Food::default();
         player.invulnerable = 0;
         player.flying = false;
@@ -768,6 +826,7 @@ impl Game {
         self.broadcast(Some(entity_id), &Outbound::Respawned(state));
         self.send_health(entity_id);
         self.send_experience(entity_id);
+        self.send_attributes(entity_id);
         self.send_menu(entity_id);
         if let Some(player) = self.players.get(&entity_id) {
             let slot = player.inventory.selected() as i32;
@@ -816,19 +875,18 @@ impl Game {
                 return;
             }
             BOW_USE_TICKS
+        } else if matches!(
+            item.name.as_str(),
+            "minecraft:splash_potion" | "minecraft:lingering_potion"
+        ) {
+            let stack = stack.clone();
+            return self.throw_potion(entity_id, slot, &stack);
         } else {
-            let Some(food) = &item.food else {
+            let stack = stack.clone();
+            let Some(ticks) = self.may_consume(entity_id, &stack) else {
                 return;
             };
-            // `Player.canEat`.
-            let may_eat =
-                !mortal(player.game_mode()) || food.can_always_eat || player.food.level < 20;
-            if !may_eat {
-                return;
-            }
-            (item.consume_seconds.unwrap_or(1.6) * 20.0)
-                .round()
-                .max(1.0) as u32
+            ticks
         };
         let item = stack.item;
         let Some(player) = self.players.get_mut(&entity_id) else {
@@ -901,6 +959,19 @@ impl Game {
         );
         let eyes = player.eyes();
         let at = player.pos;
+        let weapon = player.inventory.get(using.slot).cloned();
+        // The arrow it shoots: from the inventory, or a plain one in
+        // creative.
+        let arrow = ammo
+            .and_then(|slot| player.inventory.get(slot).cloned())
+            .or_else(|| Some(crate::stack::plain(data.item_id("minecraft:arrow")?, 1)));
+        let Some(mut arrow) = arrow else {
+            return;
+        };
+        arrow.count = 1;
+        // `ProjectileWeaponItem.useAmmo`: infinity spares plain arrows.
+        let used = weapon.as_ref().map_or(1, |w| self.ammo_use(w, &arrow, 1));
+        let infinite = creative || used == 0;
         self.shoot_arrow(super::projectile::Shot {
             owner: Some(entity_id),
             from: [eyes[0], eyes[1] - 0.1, eyes[2]],
@@ -914,11 +985,13 @@ impl Game {
             inaccuracy: 1.0,
             base_damage: 2.0,
             crit: power >= 1.0,
-            pickup: if creative {
+            pickup: if infinite {
                 super::projectile::Pickup::CreativeOnly
             } else {
                 super::projectile::Pickup::Allowed
             },
+            item: arrow,
+            weapon,
         });
         let pitch = 1.0 / (rand::random::<f32>() * 0.4 + 1.2) + power * 0.5;
         self.play_sound_from(
@@ -930,7 +1003,9 @@ impl Game {
             pitch,
         );
         if !creative {
-            if let Some(ammo) = ammo {
+            if let Some(ammo) = ammo
+                && !infinite
+            {
                 self.update_inventory(entity_id, |inventory| {
                     inventory.take(ammo, 1);
                 });
@@ -970,48 +1045,16 @@ impl Game {
         let Some(item) = data.item(using.item) else {
             return self.stop_using(entity_id);
         };
-        if item.food.is_none() {
+        if !item.components.contains_key("consumable") {
             // A bow held for the full hour simply stays drawn.
             return self.stop_using(entity_id);
         }
-        if let Some(food) = &item.food {
-            // `FoodData.add`.
-            let level = (player.food.level + food.nutrition).clamp(0, 20);
-            player.food.level = level;
-            player.food.saturation =
-                (player.food.saturation + food.saturation).clamp(0.0, level as f32);
-        }
-        let consume = mortal(player.game_mode());
-        let remainder = use_remainder(&item.name).and_then(|name| data.item_id(name));
         player.send(Outbound::Packet(Arc::new(Encoded::new(&EntityEvent {
             entity_id,
             event: EVENT_USE_ITEM_COMPLETE,
         }))));
         self.stop_using(entity_id);
-        if consume {
-            let slot = using.slot;
-            self.update_inventory(entity_id, |inventory| {
-                inventory.take(slot, 1);
-            });
-            if let Some(remainder) = remainder {
-                let bowl = ItemStack {
-                    item: remainder,
-                    count: 1,
-                    patch: Default::default(),
-                };
-                let empty = self
-                    .players
-                    .get(&entity_id)
-                    .is_some_and(|p| p.inventory.get(slot).is_none());
-                if empty {
-                    self.update_inventory(entity_id, |inventory| inventory.set(slot, Some(bowl)));
-                } else {
-                    self.give(entity_id, bowl);
-                }
-            }
-            self.send_slots(entity_id, &[slot]);
-        }
-        self.send_health(entity_id);
+        self.consume(entity_id, using.slot);
     }
 
     /// `FoodData.tick`: exhaustion eats saturation, then food; a full
@@ -1021,13 +1064,15 @@ impl Game {
     fn tick_food(&mut self, entity_id: i32) {
         let difficulty = self.context.difficulty;
         let tick = self.tick;
+        let max_health = self.max_health(Living::Player(entity_id));
+        let regenerates = self.rules.flag("natural_health_regeneration");
         let Some(player) = self.players.get_mut(&entity_id) else {
             return;
         };
         if difficulty == 0 && mortal(player.game_mode()) {
             let mut changed = false;
-            if player.health < MAX_HEALTH && tick.is_multiple_of(20) {
-                player.health = (player.health + 1.0).min(MAX_HEALTH);
+            if regenerates && player.health < max_health && tick.is_multiple_of(20) {
+                player.health = (player.health + 1.0).min(max_health);
                 player.data_dirty = true;
                 player.state = None;
                 changed = true;
@@ -1051,7 +1096,7 @@ impl Game {
                 food.level = (food.level - 1).max(0);
             }
         }
-        let hurt = player.health < MAX_HEALTH && player.health > 0.0;
+        let hurt = regenerates && player.health < max_health && player.health > 0.0;
         let mut heal = 0.0;
         let mut starve = false;
         if food.saturation > 0.0 && hurt && food.level >= 20 {
@@ -1083,7 +1128,7 @@ impl Game {
             food.timer = 0;
         }
         if heal > 0.0 {
-            player.health = (player.health + heal).min(MAX_HEALTH);
+            player.health = (player.health + heal).min(max_health);
             player.data_dirty = true;
             player.state = None;
         }
@@ -1119,6 +1164,7 @@ impl Game {
                 continue;
             }
             player.invulnerable = player.invulnerable.saturating_sub(1);
+            self.tick_effects(Living::Player(entity_id));
             self.tick_movement(entity_id);
             self.tick_player_hazards(entity_id);
             self.tick_digging(entity_id);

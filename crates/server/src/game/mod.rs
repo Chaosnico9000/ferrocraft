@@ -7,11 +7,18 @@
 //! so that block changes and chat reach everyone in the same order. The
 //! connections only decide what their client can see.
 
+mod attributes;
 mod blocks;
+mod brewing;
 mod combat;
 mod command;
 mod console;
+mod consume;
+mod damage;
 mod dispenser;
+mod effect;
+mod enchant;
+mod enchanting;
 mod explosion;
 mod falling;
 mod fire;
@@ -30,6 +37,7 @@ mod path;
 mod physics;
 mod piston;
 mod player;
+mod potion;
 mod projectile;
 mod redstone;
 mod survival;
@@ -161,6 +169,17 @@ pub enum Event {
         entity_id: i32,
         update: SignUpdate,
     },
+    /// A button of a screen: one of the enchanting table's offers.
+    MenuButton {
+        entity_id: i32,
+        container_id: i32,
+        button: i32,
+    },
+    /// The anvil's name field.
+    RenameItem {
+        entity_id: i32,
+        name: String,
+    },
     /// The middle click on a block.
     PickBlock {
         entity_id: i32,
@@ -216,6 +235,10 @@ pub struct Joined {
     pub experience: Experience,
     pub fire: i32,
     pub air: i32,
+    /// Status effects as saved, and the golden hearts.
+    pub effects: Vec<Nbt>,
+    pub absorption: f32,
+    pub enchantment_seed: i32,
     pub skin_parts: u8,
     pub main_hand: i32,
     pub outbound: UnboundedSender<Outbound>,
@@ -390,6 +413,8 @@ struct Game {
     arrows: HashMap<i32, projectile::Arrow>,
     tnts: HashMap<i32, tnt::PrimedTnt>,
     orbs: HashMap<i32, orb::Orb>,
+    potions: HashMap<i32, potion::ThrownPotion>,
+    clouds: HashMap<i32, potion::Cloud>,
     /// Entities of chunks no player is near, and those Ferrocraft cannot
     /// run, kept for saving.
     stored: StoredEntities,
@@ -449,6 +474,8 @@ impl Game {
             arrows: HashMap::new(),
             tnts: HashMap::new(),
             orbs: HashMap::new(),
+            potions: HashMap::new(),
+            clouds: HashMap::new(),
             stored: std::mem::take(&mut context.entities),
             foreign: HashMap::new(),
             explosion_knockback: Vec::new(),
@@ -514,6 +541,7 @@ impl Game {
             self.tick_items();
             self.tick_mobs();
             self.tick_arrows();
+            self.tick_potions();
             self.tick_tnt();
             self.tick_falling();
             self.tick_orbs();
@@ -711,6 +739,12 @@ impl Game {
                 }
             }
             Event::SignUpdate { entity_id, update } => self.sign_update(entity_id, &update),
+            Event::MenuButton {
+                entity_id,
+                container_id,
+                button,
+            } => self.menu_button(entity_id, container_id, button),
+            Event::RenameItem { entity_id, name } => self.rename_item(entity_id, &name),
             Event::PickBlock {
                 entity_id,
                 pos,
@@ -835,6 +869,13 @@ impl Game {
             move_packets: 0,
             floating: false,
             floating_ticks: 0,
+            effects: effect::Effects::from_nbt(
+                Some(&Nbt::List(joined.effects)),
+                &self.context.data,
+            ),
+            absorption: joined.absorption,
+            sent_attributes: Vec::new(),
+            enchantment_seed: joined.enchantment_seed,
         };
 
         // The newcomer learns about everyone, everyone about the newcomer.
@@ -869,6 +910,11 @@ impl Game {
         self.send_difficulty(Some(entity_id));
         self.send_weather(entity_id);
         self.send_own_data(entity_id);
+        self.send_effects(entity_id);
+        self.send_attributes(entity_id);
+        if self.rules.flag("immediate_respawn") || self.rules.flag("reduced_debug_info") {
+            self.send_client_rules(entity_id);
+        }
         if self.players.get(&entity_id).is_some_and(|p| p.dead) {
             // Saved dead: straight to the death screen.
             self.die(
@@ -1001,7 +1047,8 @@ impl Game {
         let Some(storage) = &self.context.storage else {
             return;
         };
-        if let Err(err) = storage.save_player(player.uuid(), &player.saved(), &self.context.data) {
+        let saved = player.saved(&self.context.data);
+        if let Err(err) = storage.save_player(player.uuid(), &saved, &self.context.data) {
             warn!(name = %player.name(), "saving the player failed: {err:#}");
         }
     }
@@ -1241,6 +1288,7 @@ impl Game {
     /// items and mobs: arrows, experience orbs, lit TNT and falling blocks.
     fn projectile_states(&mut self) -> Vec<Arc<EntityState>> {
         let mut states = self.arrow_states();
+        states.extend(self.potion_states());
         states.extend(self.orb_states());
         states.extend(self.tnt_states());
         states.extend(self.falling_states());

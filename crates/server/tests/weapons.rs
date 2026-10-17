@@ -199,3 +199,57 @@ async fn tnt_blows_up_and_sets_off_its_neighbour() {
     // Without decay every broken block drops: lots of dirt.
     assert!(drops > 10, "{drops} drops");
 }
+
+#[tokio::test]
+async fn enchanted_bows_and_tipped_arrows() {
+    use ferrocraft_protocol::packets::play::UpdateMobEffect;
+    let data = GameData::load().unwrap();
+    let slowness = data.effect("minecraft:slowness").unwrap().0 as i32;
+    let addr = start(operators()).await;
+    let (mut alex, _) = join(addr, "Alex", 4).await;
+    let (mut steve, _) = join(addr, "Steve", 4).await;
+    walk(&mut steve, [0.5, -60.0, 6.5], None).await;
+    // Bow, tipped arrow, plain arrow: in that order in the hotbar.
+    run(&mut alex, "give @s bow[enchantments={infinity:1,flame:1}]").await;
+    run(
+        &mut alex,
+        r#"give @s tipped_arrow[potion_contents={potion:"minecraft:slowness"}]"#,
+    )
+    .await;
+    run(&mut alex, "give @s arrow").await;
+    run(&mut alex, "gamemode survival").await;
+    read_matching(&mut alex, |e: &GameEvent| e.event == 3).await;
+    run(&mut alex, "gamemode survival Steve").await;
+    read_matching(&mut steve, |e: &GameEvent| e.event == 3).await;
+    walk(&mut alex, [0.5, -60.0, 0.5], Some([0.0, 10.0])).await;
+    // The tipped arrow first: Steve is slowed for an eighth of its minute
+    // and a half, and set alight by flame.
+    shoot(&mut alex, 1100, 1, 10.0).await;
+    let slowed = tokio::time::timeout(
+        Duration::from_secs(4),
+        read_matching(&mut steve, |e: &UpdateMobEffect| e.effect == slowness),
+    )
+    .await
+    .expect("slowed by the arrow");
+    assert_eq!(slowed.duration, 1800 / 8);
+    read_matching(&mut steve, |d: &SetEntityData| {
+        d.values
+            .0
+            .iter()
+            .any(|v| v.index == 0 && matches!(v.value, EntityData::Byte(f) if f & 1 != 0))
+    })
+    .await;
+    // Infinity used it up all the same; the tipped arrow is gone, the
+    // plain one stays when shot.
+    read_matching(&mut alex, |s: &ContainerSetSlot| {
+        s.slot == 37 && s.stack.0.is_none()
+    })
+    .await;
+    shoot(&mut alex, 1100, 2, 10.0).await;
+    let used = tokio::time::timeout(
+        Duration::from_millis(800),
+        read_matching(&mut alex, |s: &ContainerSetSlot| s.slot == 38),
+    )
+    .await;
+    assert!(used.is_err(), "infinity keeps the arrow");
+}

@@ -17,6 +17,10 @@
 //! - `features.json`: what grows from saplings (the tree features of
 //!   `TreeGrower`), the block state providers they use, and the block
 //!   transformers of hoes, shovels and axes,
+//! - `alchemy.json`: status effects, potions and attributes, from
+//!   `alchemy.json` (`scripts/Alchemy.java`),
+//! - `enchantments.json`: the enchantments as the data pack has them, in
+//!   network-id order,
 //! - `ids.json`: the names of further static registries in network-id order.
 //!
 //!   gen-data <generator output dir> <data/version dir>
@@ -132,6 +136,9 @@ fn main() -> anyhow::Result<()> {
         "data_component_type",
         "sound_event",
         "particle_type",
+        "mob_effect",
+        "potion",
+        "attribute",
     ] {
         names.push(format!(
             "  \"{registry}\": {}",
@@ -148,6 +155,13 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(out.join("entities.json"), entities)?;
     std::fs::write(out.join("recipes.json"), recipes)?;
     std::fs::write(out.join("features.json"), features)?;
+    let alchemy = read_json(&generated.join("alchemy.json"))
+        .context("alchemy.json: run scripts/Alchemy.java first")?;
+    std::fs::write(out.join("alchemy.json"), alchemy_json(&alchemy, &ids)?)?;
+    std::fs::write(
+        out.join("enchantments.json"),
+        enchantments_json(&data, &synced)?,
+    )?;
     std::fs::write(
         out.join("ids.json"),
         format!("{{\n{}\n}}\n", names.join(",\n")),
@@ -451,6 +465,9 @@ fn read_blocks(
             if let Some(entity) = block["block_entity"].as_str() {
                 line["block_entity"] = entity.into();
             }
+            if !block["xp"].is_null() {
+                line["xp"] = block["xp"].clone();
+            }
             if !block["fire"].is_null() {
                 line["fire"] = block["fire"].clone();
             }
@@ -592,7 +609,91 @@ fn items_json(
             }
             line["fuel"] = resolved.into();
         }
+        // `brewing_fuel`: how many brews it gives and how fast.
+        let brewing = &c["minecraft:brewing_fuel"];
+        if brewing.is_object() {
+            let uses = resolve_number(data, "context_int_provider", &brewing["uses"], false)
+                .with_context(|| format!("brewing uses of {name}"))?;
+            let speed = match &brewing["speed_multiplier"] {
+                Value::Null => 1.0,
+                speed => resolve_number(data, "context_float_provider", speed, false)
+                    .with_context(|| format!("brewing speed of {name}"))?,
+            };
+            line["brewing_fuel"] = serde_json::json!([uses.floor() as i64, speed]);
+        }
+        // Components the server reads as vanilla wrote them.
+        let mut kept = serde_json::Map::new();
+        for component in ITEM_COMPONENTS {
+            let value = &c[format!("minecraft:{component}")];
+            if !value.is_null() {
+                kept.insert((*component).to_owned(), value.clone());
+            }
+        }
+        if !kept.is_empty() {
+            line["components"] = kept.into();
+        }
         lines.push(format!("  {line}"));
+    }
+    Ok(format!("[\n{}\n]\n", lines.join(",\n")))
+}
+
+/// Default components of items that `items.json` keeps as they are.
+const ITEM_COMPONENTS: &[&str] = &[
+    "attribute_modifiers",
+    "consumable",
+    "use_remainder",
+    "enchantable",
+    "repairable",
+    "equippable",
+    "weapon",
+    "damage_resistant",
+    "death_protection",
+    "potion_contents",
+    "potion_duration_scale",
+    "suspicious_stew_effects",
+    "rarity",
+    "enchantment_glint_override",
+    "stored_enchantments",
+    "ominous_bottle_amplifier",
+];
+
+/// `{"effects": [...], "potions": [...]}` from `scripts/Alchemy.java`,
+/// checked against the registries' network ids.
+fn alchemy_json(
+    alchemy: &Value,
+    ids: &HashMap<String, HashMap<String, i32>>,
+) -> anyhow::Result<String> {
+    for (key, registry) in [
+        ("effects", "minecraft:mob_effect"),
+        ("potions", "minecraft:potion"),
+        ("attributes", "minecraft:attribute"),
+    ] {
+        let list = alchemy[key].as_array().context("alchemy lists")?;
+        for (index, entry) in list.iter().enumerate() {
+            let name = entry["name"].as_str().context("name")?;
+            if ids[registry].get(name) != Some(&(index as i32)) {
+                bail!("{name} is not in {registry} at {index}");
+            }
+        }
+    }
+    Ok(serde_json::to_string(alchemy)? + "\n")
+}
+
+/// The enchantments in network-id order, one per line, as vanilla's data
+/// pack has them.
+fn enchantments_json(data: &Path, synced: &[(String, Vec<String>)]) -> anyhow::Result<String> {
+    let (_, names) = synced
+        .iter()
+        .find(|(r, _)| r == "minecraft:enchantment")
+        .context("enchantment registry")?;
+    let mut lines = Vec::new();
+    for name in names {
+        let path = data
+            .join("enchantment")
+            .join(format!("{}.json", name.trim_start_matches("minecraft:")));
+        let mut enchantment = read_json(&path)?;
+        enchantment["name"] = name.as_str().into();
+        lines.push(format!("  {enchantment}"));
     }
     Ok(format!("[\n{}\n]\n", lines.join(",\n")))
 }
@@ -698,8 +799,8 @@ fn entities_json(entity_ids: &HashMap<String, i32>, info: &Value) -> anyhow::Res
     Ok(format!("[\n{}\n]\n", lines.join(",\n")))
 }
 
-/// The shaped and shapeless crafting recipes and the cooking ones, one per
-/// line.
+/// The shaped and shapeless crafting recipes, the cooking and the brewing
+/// ones, one per line.
 fn recipes_json(dir: &Path) -> anyhow::Result<String> {
     let mut lines = Vec::new();
     for path in walk(dir)? {
@@ -713,6 +814,7 @@ fn recipes_json(dir: &Path) -> anyhow::Result<String> {
                 | "minecraft:blasting"
                 | "minecraft:smoking"
                 | "minecraft:campfire_cooking"
+                | "minecraft:brewing"
         ) {
             let name = slash_path(path.strip_prefix(dir)?.with_extension("").as_path());
             lines.push(format!("  \"minecraft:{name}\": {recipe}"));

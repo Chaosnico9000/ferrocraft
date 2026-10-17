@@ -95,6 +95,16 @@ public class BlockPhysics {
                 classes.add(c.getSimpleName());
             }
             out.add("classes", classes);
+            // `DropExperienceBlock.xpRange`: experience when mined right.
+            if (block instanceof net.minecraft.world.level.block.DropExperienceBlock) {
+                var xpRange = net.minecraft.world.level.block.DropExperienceBlock.class.getDeclaredField("xpRange");
+                xpRange.setAccessible(true);
+                var range = (net.minecraft.util.valueproviders.IntProvider) xpRange.get(block);
+                JsonArray xp = new JsonArray();
+                xp.add(range.minInclusive());
+                xp.add(range.maxInclusive());
+                out.add("xp", xp);
+            }
             if (igniteOdds.getInt(block) > 0 || burnOdds.getInt(block) > 0) {
                 JsonArray fire = new JsonArray();
                 fire.add(igniteOdds.getInt(block));

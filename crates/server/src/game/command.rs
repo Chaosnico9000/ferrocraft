@@ -6,7 +6,7 @@
 use ferrocraft_protocol::Nbt;
 use ferrocraft_protocol::codec::BlockPos;
 use ferrocraft_protocol::packets::play::{
-    CommandNode, Commands, ComponentPatch, GameMode, ItemStack, NodeKind, text,
+    CommandNode, Commands, GameMode, ItemStack, NodeKind, text,
 };
 use tracing::info;
 
@@ -237,6 +237,75 @@ pub fn tree(data: &GameData, permission: u8) -> Commands {
             kinds.push(t.literal(kind, true, vec![duration]));
         }
         root.push(t.literal("weather", false, kinds));
+
+        // `effect give <targets> <effect> [<seconds>|infinite] [<amplifier>]
+        // [<hideParticles>]`, `effect clear [<targets>] [<effect>]`.
+        let resource = |registry: &str| {
+            let mut properties = Vec::new();
+            ferrocraft_protocol::codec::Encode::encode(registry, &mut properties);
+            properties
+        };
+        let integer =
+            |min: i32, max: i32| [&[3u8][..], &min.to_be_bytes(), &max.to_be_bytes()].concat();
+        let hide = t.argument(
+            "hideParticles",
+            "brigadier:bool",
+            Vec::new(),
+            true,
+            Vec::new(),
+        );
+        let amplifier = t.argument(
+            "amplifier",
+            "brigadier:integer",
+            integer(0, 255),
+            true,
+            vec![hide],
+        );
+        let seconds = t.argument(
+            "seconds",
+            "brigadier:integer",
+            integer(1, 1_000_000),
+            true,
+            vec![amplifier],
+        );
+        let infinite = t.literal("infinite", true, vec![amplifier]);
+        let effect = t.argument(
+            "effect",
+            "minecraft:resource",
+            resource("minecraft:mob_effect"),
+            true,
+            vec![seconds, infinite],
+        );
+        let give_targets = t.entities("targets", false, false, vec![effect]);
+        let give = t.literal("give", false, vec![give_targets]);
+        let clear_effect = t.argument(
+            "effect",
+            "minecraft:resource",
+            resource("minecraft:mob_effect"),
+            true,
+            Vec::new(),
+        );
+        let clear_targets = t.entities("targets", false, true, vec![clear_effect]);
+        let clear = t.literal("clear", true, vec![clear_targets]);
+        root.push(t.literal("effect", false, vec![give, clear]));
+
+        // `enchant <targets> <enchantment> [<level>]`.
+        let level = t.argument(
+            "level",
+            "brigadier:integer",
+            [&[1u8][..], &0i32.to_be_bytes()].concat(),
+            true,
+            Vec::new(),
+        );
+        let enchantment = t.argument(
+            "enchantment",
+            "minecraft:resource",
+            resource("minecraft:enchantment"),
+            true,
+            vec![level],
+        );
+        let enchant_targets = t.entities("targets", false, false, vec![enchantment]);
+        root.push(t.literal("enchant", false, vec![enchant_targets]));
     }
     let root = t.add(NodeKind::Root, false, root);
     Commands {
@@ -392,6 +461,8 @@ impl Game {
         let permission = player.permission;
         let reply = self.execute(sender, permission, line);
         let content = match reply {
+            // `send_command_feedback`: successes may go unsaid, failures not.
+            Ok(_) if !self.rules.flag("send_command_feedback") => return,
             Ok(message) | Err(message) => message,
         };
         if let Some(player) = self.players.get(&sender) {
@@ -407,7 +478,7 @@ impl Game {
     /// Runs a command for a player or the console with the given
     /// permission; the answer.
     pub(super) fn execute(&mut self, sender: i32, permission: u8, line: &str) -> Reply {
-        let words: Vec<&str> = line.split_whitespace().collect();
+        let words = split_arguments(line);
         match words.as_slice() {
             ["list"] => Ok(self.list()),
             [name, ..] if permission < OPERATOR && *name != "list" => {
@@ -428,6 +499,13 @@ impl Game {
             }
             ["gamerule", rule, rest @ ..] => self.gamerule_command(rule, rest),
             ["weather", kind, rest @ ..] => self.weather_command(kind, rest),
+            ["effect", "give", target, effect, rest @ ..] => {
+                self.effect_give_command(sender, target, effect, rest)
+            }
+            ["effect", "clear", rest @ ..] => self.effect_clear_command(sender, rest),
+            ["enchant", target, enchantment, rest @ ..] => {
+                self.enchant_command(sender, target, enchantment, rest)
+            }
             ["kill", rest @ ..] => {
                 let victims = match rest {
                     [] => self.myself(sender)?,
@@ -851,6 +929,7 @@ impl Game {
                         vec![text::plain(&max.to_string()), plain.clone()],
                     ),
                 })?;
+                self.rule_changed(name);
                 Ok(text::translate(
                     "commands.gamerule.set",
                     vec![text::plain(name), text::plain(&set.to_string())],
@@ -989,17 +1068,346 @@ impl Game {
         ))
     }
 
-    fn give_command(&mut self, sender: i32, target: &str, item: &str, rest: &[&str]) -> Reply {
-        // Components in brackets are not supported; the item id is enough.
-        let name = item.split('[').next().unwrap_or(item);
-        let name = if name.contains(':') {
-            name.to_owned()
+    /// `MinecraftServer.onGameRuleChanged`: rules the clients act on.
+    fn rule_changed(&mut self, name: &str) {
+        match name {
+            "immediate_respawn" | "reduced_debug_info" => {
+                let ids: Vec<i32> = self.players.keys().copied().collect();
+                for id in ids {
+                    self.send_client_rules(id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The rules a client acts on itself: the death screen
+    /// (`immediate_respawn`, game event 11) and the debug screen
+    /// (`reduced_debug_info`, entity events 22 and 23).
+    pub(super) fn send_client_rules(&self, entity_id: i32) {
+        let Some(player) = self.players.get(&entity_id) else {
+            return;
+        };
+        let immediate = self.rules.flag("immediate_respawn");
+        player.send(super::Outbound::Packet(std::sync::Arc::new(
+            super::Encoded::new(&ferrocraft_protocol::packets::play::GameEvent {
+                event: 11,
+                param: if immediate { 1.0 } else { 0.0 },
+            }),
+        )));
+        let reduced = self.rules.flag("reduced_debug_info");
+        player.send(super::Outbound::Packet(std::sync::Arc::new(
+            super::Encoded::new(&ferrocraft_protocol::packets::play::EntityEvent {
+                entity_id,
+                event: if reduced { 22 } else { 23 },
+            }),
+        )));
+    }
+
+    /// Players a selector or name stands for, and with `@e` the mobs too.
+    fn living_targets(&self, sender: i32, word: &str) -> Vec<i32> {
+        let mut targets = self.targets(sender, word);
+        if word == "@e" {
+            targets.extend(
+                self.mobs
+                    .values()
+                    .filter(|m| m.alive())
+                    .map(|m| m.entity_id),
+            );
+        }
+        targets
+    }
+
+    /// The name of a player or mob, as commands show it.
+    fn display_name(&self, entity_id: i32) -> Nbt {
+        if self.players.contains_key(&entity_id) {
+            self.player_name(entity_id)
         } else {
-            format!("minecraft:{name}")
+            self.entity_name(entity_id)
+                .unwrap_or_else(|| text::plain("?"))
+        }
+    }
+
+    /// `effect give`.
+    fn effect_give_command(
+        &mut self,
+        sender: i32,
+        target: &str,
+        effect: &str,
+        rest: &[&str],
+    ) -> Reply {
+        let data = std::sync::Arc::clone(&self.context.data);
+        let name = qualify(effect);
+        let Some((id, info)) = data.effect(&name) else {
+            return Err(error(
+                "argument.resource.not_found",
+                vec![text::plain(&name), text::plain("minecraft:mob_effect")],
+            ));
         };
-        let Some(id) = self.context.data.item_id(&name).filter(|&id| id != 0) else {
-            return Err(error("argument.item.id.invalid", vec![text::plain(&name)]));
+        let seconds = match rest.first() {
+            None => None,
+            Some(&"infinite") => Some(-1),
+            Some(word) => Some(
+                word.parse::<i32>()
+                    .ok()
+                    .filter(|s| (1..=1_000_000).contains(s))
+                    .ok_or_else(|| error("parsing.int.invalid", vec![text::plain(word)]))?,
+            ),
         };
+        let amplifier = match rest.get(1) {
+            None => 0,
+            Some(word) => word
+                .parse::<i32>()
+                .ok()
+                .filter(|a| (0..=255).contains(a))
+                .ok_or_else(|| error("parsing.int.invalid", vec![text::plain(word)]))?,
+        };
+        let hide = match rest.get(2) {
+            None => false,
+            Some(&"true") => true,
+            Some(&"false") => false,
+            Some(word) => return Err(error("parsing.bool.invalid", vec![text::plain(word)])),
+        };
+        // `computeDurationInTicks`.
+        let duration = match seconds {
+            Some(s) if info.instant => s,
+            Some(-1) => -1,
+            Some(s) => s * 20,
+            None if info.instant => 1,
+            None => 600,
+        };
+        let mut given = Vec::new();
+        for entity in self.living_targets(sender, target) {
+            let Some(living) = self.living(entity) else {
+                continue;
+            };
+            let mut instance = super::effect::EffectInstance::new(id, duration, amplifier);
+            instance.visible = !hide;
+            instance.show_icon = !hide;
+            if self.add_effect(living, instance) {
+                given.push(entity);
+            }
+        }
+        let effect_name = text::translate(
+            &format!("effect.{}", name.replace(':', ".")),
+            Vec::new(),
+            None,
+        );
+        match given.as_slice() {
+            [] => Err(error("commands.effect.give.failed", Vec::new())),
+            [one] => Ok(text::translate(
+                "commands.effect.give.success.single",
+                vec![
+                    effect_name,
+                    self.display_name(*one),
+                    text::plain(&(duration / 20).to_string()),
+                ],
+                None,
+            )),
+            many => Ok(text::translate(
+                "commands.effect.give.success.multiple",
+                vec![
+                    effect_name,
+                    text::plain(&many.len().to_string()),
+                    text::plain(&(duration / 20).to_string()),
+                ],
+                None,
+            )),
+        }
+    }
+
+    /// `effect clear [<targets>] [<effect>]`.
+    fn effect_clear_command(&mut self, sender: i32, rest: &[&str]) -> Reply {
+        let data = std::sync::Arc::clone(&self.context.data);
+        let targets = match rest.first() {
+            None => self.myself(sender)?,
+            Some(target) => self.living_targets(sender, target),
+        };
+        let effect = match rest.get(1) {
+            None => None,
+            Some(word) => {
+                let name = qualify(word);
+                let Some((id, _)) = data.effect(&name) else {
+                    return Err(error(
+                        "argument.resource.not_found",
+                        vec![text::plain(&name), text::plain("minecraft:mob_effect")],
+                    ));
+                };
+                Some((id, name))
+            }
+        };
+        let mut cleared = Vec::new();
+        for entity in targets {
+            let Some(living) = self.living(entity) else {
+                continue;
+            };
+            let done = match &effect {
+                Some((id, _)) => self.remove_effect(living, *id),
+                None => self.clear_effects(living),
+            };
+            if done {
+                cleared.push(entity);
+            }
+        }
+        match (&effect, cleared.as_slice()) {
+            (None, []) => Err(error("commands.effect.clear.everything.failed", Vec::new())),
+            (Some(_), []) => Err(error("commands.effect.clear.specific.failed", Vec::new())),
+            (None, [one]) => Ok(text::translate(
+                "commands.effect.clear.everything.success.single",
+                vec![self.display_name(*one)],
+                None,
+            )),
+            (None, many) => Ok(text::translate(
+                "commands.effect.clear.everything.success.multiple",
+                vec![text::plain(&many.len().to_string())],
+                None,
+            )),
+            (Some((_, name)), [one]) => Ok(text::translate(
+                "commands.effect.clear.specific.success.single",
+                vec![
+                    text::translate(
+                        &format!("effect.{}", name.replace(':', ".")),
+                        Vec::new(),
+                        None,
+                    ),
+                    self.display_name(*one),
+                ],
+                None,
+            )),
+            (Some((_, name)), many) => Ok(text::translate(
+                "commands.effect.clear.specific.success.multiple",
+                vec![
+                    text::translate(
+                        &format!("effect.{}", name.replace(':', ".")),
+                        Vec::new(),
+                        None,
+                    ),
+                    text::plain(&many.len().to_string()),
+                ],
+                None,
+            )),
+        }
+    }
+
+    /// `enchant <targets> <enchantment> [<level>]`: the item in the main
+    /// hand, if the enchantment suits it and its others.
+    fn enchant_command(
+        &mut self,
+        sender: i32,
+        target: &str,
+        enchantment: &str,
+        rest: &[&str],
+    ) -> Reply {
+        let data = std::sync::Arc::clone(&self.context.data);
+        let name = qualify(enchantment);
+        let Some((_, json)) = data.enchantment(&name) else {
+            return Err(error(
+                "argument.resource.not_found",
+                vec![text::plain(&name), text::plain("minecraft:enchantment")],
+            ));
+        };
+        let level = match rest.first() {
+            None => 1,
+            Some(word) => word
+                .parse::<i32>()
+                .ok()
+                .filter(|l| *l >= 0)
+                .ok_or_else(|| error("parsing.int.invalid", vec![text::plain(word)]))?,
+        };
+        let max = super::enchant::max_level(json);
+        if level > max {
+            return Err(error(
+                "commands.enchant.failed.level",
+                vec![
+                    text::plain(&level.to_string()),
+                    text::plain(&max.to_string()),
+                ],
+            ));
+        }
+        let targets = self.living_targets(sender, target);
+        let single = targets.len() == 1;
+        let mut enchanted = Vec::new();
+        for entity in targets {
+            let Some(player) = self.players.get(&entity) else {
+                if single {
+                    return Err(error(
+                        "commands.enchant.failed.itemless",
+                        vec![self.display_name(entity)],
+                    ));
+                }
+                continue;
+            };
+            let slot = player.inventory.selected_slot();
+            let Some(mut stack) = player.inventory.get(slot).cloned() else {
+                if single {
+                    return Err(error(
+                        "commands.enchant.failed.itemless",
+                        vec![self.display_name(entity)],
+                    ));
+                }
+                continue;
+            };
+            let existing = crate::stack::enchantments(&data, &stack);
+            let fits = super::enchant::supports(&data, json, stack.item)
+                && existing
+                    .iter()
+                    .all(|(other, _)| super::enchant::compatible(&data, other, &name));
+            if !fits {
+                if single {
+                    let item = data
+                        .item(stack.item)
+                        .map_or(String::new(), |i| i.name.clone());
+                    return Err(error(
+                        "commands.enchant.failed.incompatible",
+                        vec![text::translate(
+                            &format!("item.{}", item.replace(':', ".")),
+                            Vec::new(),
+                            None,
+                        )],
+                    ));
+                }
+                continue;
+            }
+            // `ItemEnchantments.Mutable.upgrade`.
+            let mut enchantments = existing;
+            match enchantments.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, l)) => *l = (*l).max(level),
+                None => enchantments.push((name.clone(), level)),
+            }
+            crate::stack::set_enchantments_in(
+                &data,
+                &mut stack,
+                "minecraft:enchantments",
+                &enchantments,
+            );
+            self.update_inventory(entity, |inventory| inventory.set(slot, Some(stack)));
+            self.send_slots(entity, &[slot]);
+            enchanted.push(entity);
+        }
+        let full = enchantment_name(&data, &name, level);
+        match enchanted.as_slice() {
+            [] => Err(error("commands.enchant.failed", Vec::new())),
+            [one] => Ok(text::translate(
+                "commands.enchant.success.single",
+                vec![full, self.display_name(*one)],
+                None,
+            )),
+            many => Ok(text::translate(
+                "commands.enchant.success.multiple",
+                vec![full, text::plain(&many.len().to_string())],
+                None,
+            )),
+        }
+    }
+
+    fn give_command(&mut self, sender: i32, target: &str, item: &str, rest: &[&str]) -> Reply {
+        let stack = parse_item(&self.context.data, item)?;
+        let id = stack.item;
+        let name = self
+            .context
+            .data
+            .item(id)
+            .map_or_else(String::new, |i| i.name.clone());
         let count: i32 = match rest {
             [] => 1,
             [count] => count
@@ -1017,9 +1425,8 @@ impl Game {
             self.give(
                 receiver,
                 ItemStack {
-                    item: id,
                     count,
-                    patch: ComponentPatch::default(),
+                    ..stack.clone()
                 },
             );
         }
@@ -1037,6 +1444,152 @@ impl Game {
             ],
             None,
         ))
+    }
+}
+
+/// The words of a command, keeping brackets, braces and quotes together
+/// (`give @s stick[custom_name="a b"]` is three words after `give`).
+fn split_arguments(line: &str) -> Vec<&str> {
+    let mut words = Vec::new();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut start = None;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        if start.is_none() && !c.is_whitespace() {
+            start = Some(i);
+        }
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth -= 1,
+            c if c.is_whitespace() && depth <= 0 => {
+                if let Some(s) = start.take() {
+                    words.push(&line[s..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        words.push(&line[s..]);
+    }
+    words
+}
+
+/// `ItemParser`: an item id, then components in brackets:
+/// `diamond_sword[enchantments={sharpness:5},!repair_cost]`.
+fn parse_item(data: &GameData, text: &str) -> Result<ItemStack, Nbt> {
+    let (name, components) = match text.find('[') {
+        Some(at) => (&text[..at], Some(&text[at + 1..])),
+        None => (text, None),
+    };
+    let name = qualify(name);
+    let Some(id) = data.item_id(&name).filter(|&id| id != 0) else {
+        return Err(error("argument.item.id.invalid", vec![text::plain(&name)]));
+    };
+    let mut stack = crate::stack::plain(id, 1);
+    let Some(mut rest) = components else {
+        return Ok(stack);
+    };
+    loop {
+        rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix(']') {
+            if !after.trim().is_empty() {
+                return Err(error("argument.item.malformed", vec![text::plain(text)]));
+            }
+            return Ok(stack);
+        }
+        if let Some(removed) = rest.strip_prefix('!') {
+            let end = removed
+                .find([',', ']'])
+                .ok_or_else(|| error("argument.item.malformed", vec![text::plain(text)]))?;
+            crate::stack::remove(data, &mut stack, &qualify(removed[..end].trim()));
+            rest = &removed[end..];
+        } else {
+            let equals = rest
+                .find('=')
+                .ok_or_else(|| error("argument.item.malformed", vec![text::plain(text)]))?;
+            let component = qualify(rest[..equals].trim());
+            if data.data_component_type(&component).is_err() {
+                return Err(error(
+                    "arguments.item.component.unknown",
+                    vec![text::plain(&component)],
+                ));
+            }
+            let (value, after) = ferrocraft_protocol::snbt::parse_prefix(&rest[equals + 1..])
+                .map_err(|e| error("argument.item.malformed", vec![text::plain(e.message)]))?;
+            let shape = ferrocraft_protocol::component::component(&component).ok_or_else(|| {
+                error(
+                    "arguments.item.component.unknown",
+                    vec![text::plain(&component)],
+                )
+            })?;
+            let bytes = shape.to_wire(&value, data).map_err(|_| {
+                error(
+                    "arguments.item.component.malformed",
+                    vec![text::plain(&component), text::plain("")],
+                )
+            })?;
+            let kind = data
+                .data_component_type(&component)
+                .map_err(|_| error("argument.item.malformed", vec![text::plain(text)]))?;
+            stack.patch.added.retain(|(t, _)| *t != kind);
+            stack.patch.added.push((kind, bytes));
+            crate::stack::normalize(&mut stack);
+            rest = after;
+        }
+        rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix(',') {
+            rest = after;
+        }
+    }
+}
+
+/// `Enchantment.getFullname`: the name, and the level unless it can only
+/// be I.
+pub(super) fn enchantment_name(data: &GameData, name: &str, level: i32) -> Nbt {
+    let key = format!("enchantment.{}", name.replace(':', "."));
+    let curse = super::enchant::in_tag(data, name, "minecraft:curse");
+    let max = data
+        .enchantment(name)
+        .map_or(1, |(_, json)| super::enchant::max_level(json));
+    let mut parts = vec![text::translate(&key, Vec::new(), None)];
+    if level != 1 || max != 1 {
+        parts.push(text::plain(" "));
+        parts.push(text::translate(
+            &format!("enchantment.level.{level}"),
+            Vec::new(),
+            None,
+        ));
+    }
+    let mut entries = vec![
+        ("text".to_owned(), Nbt::String(String::new())),
+        ("extra".into(), Nbt::List(parts)),
+    ];
+    entries.push((
+        "color".into(),
+        Nbt::String(if curse { "red" } else { "gray" }.into()),
+    ));
+    Nbt::Compound(entries)
+}
+
+/// `minecraft:` in front of an id without a namespace.
+fn qualify(name: &str) -> String {
+    if name.contains(':') {
+        name.to_owned()
+    } else {
+        format!("minecraft:{name}")
     }
 }
 

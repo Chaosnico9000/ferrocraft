@@ -369,6 +369,33 @@ impl Game {
             self.open_menu(entity_id, menu, "minecraft:crafting", "container.crafting");
             return true;
         }
+        let workstation = match name {
+            "minecraft:anvil" | "minecraft:chipped_anvil" | "minecraft:damaged_anvil" => Some((
+                super::menu::Kind::Anvil,
+                "minecraft:anvil",
+                "container.repair",
+            )),
+            "minecraft:grindstone" => Some((
+                super::menu::Kind::Grindstone,
+                "minecraft:grindstone",
+                "container.grindstone_title",
+            )),
+            "minecraft:enchanting_table" => Some((
+                super::menu::Kind::Enchanting,
+                "minecraft:enchantment",
+                "container.enchant",
+            )),
+            _ => None,
+        };
+        if let Some((kind, menu_type, title)) = workstation {
+            if spectator {
+                return false;
+            }
+            let mut menu = Menu::workstation(0, pos, kind);
+            menu.block = Some(block_id);
+            self.open_menu(entity_id, menu, menu_type, title);
+            return true;
+        }
         if name == "minecraft:ender_chest" {
             if self.blocked_above(pos) {
                 return true;
@@ -592,7 +619,20 @@ impl Game {
                 self.open_menu(entity_id, menu, menu_type, title);
                 return true;
             }
-            // Brewing stands and the rest have screens of their own.
+            "minecraft:brewing_stand" => {
+                if self.context.world.block_entity(pos).is_none() {
+                    return false;
+                }
+                let mut menu = Menu::brewing(0, pos);
+                menu.block = Some(block_id);
+                self.open_menu(
+                    entity_id,
+                    menu,
+                    "minecraft:brewing_stand",
+                    "container.brewing",
+                );
+                return true;
+            }
             _ => return false,
         };
         if size == 0 || self.context.world.block_entity(pos).is_none() {

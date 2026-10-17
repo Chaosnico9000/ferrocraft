@@ -299,7 +299,10 @@ impl Game {
         });
         self.broadcast_mob(entity_id, vec![hearts]);
         self.add_mob(child);
-        self.award_experience(pos, rng.random_range(1..=7));
+        // `Animal.finalizeSpawnChildFromBreeding`: only with `mob_drops`.
+        if self.rules.flag("mob_drops") {
+            self.award_experience(pos, rng.random_range(1..=7));
+        }
     }
 
     /// The nearest player within `range` blocks for `LookAtPlayerGoal`.

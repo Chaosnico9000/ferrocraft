@@ -181,7 +181,10 @@ impl SavedTick {
 /// Block entities that tick.
 fn ticks(kind: &str) -> bool {
     crate::crafting::Cooker::of(kind).is_some()
-        || matches!(kind, "minecraft:piston" | "minecraft:hopper")
+        || matches!(
+            kind,
+            "minecraft:piston" | "minecraft:hopper" | "minecraft:brewing_stand"
+        )
 }
 
 impl World {

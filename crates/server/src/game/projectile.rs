@@ -2,7 +2,9 @@
 //! first block they hit and hurt the first player or mob in their way by
 //! how fast they fly; a fully drawn bow's arrows hit harder at random. A
 //! player's arrows can be picked up again once stuck (in creative they just
-//! go), skeletons' cannot; stuck ones vanish after a minute.
+//! go), skeletons' cannot; stuck ones vanish after a minute. Tipped arrows
+//! give their potion's effects at an eighth of the time, spectral ones make
+//! glow; the bow's enchantments add damage and knockback.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -26,9 +28,13 @@ use crate::data::Aabb;
 use crate::storage::{state_from_nbt, state_to_nbt};
 
 /// `AbstractArrow.ID_FLAGS` (0x01 critical) and `IN_GROUND`, with
-/// `PIERCE_LEVEL` (9) between them.
+/// `PIERCE_LEVEL` (9) between them; `Arrow.ID_EFFECT_COLOR`.
 const FLAGS: u8 = 8;
 const IN_GROUND: u8 = 10;
+const EFFECT_COLOR: u8 = 11;
+/// Ticks in the ground after which a tipped arrow is a plain one again
+/// (`Arrow.EXPOSED_POTION_DECAY_TIME`).
+const POTION_DECAY: u32 = 600;
 /// Ticks a stuck arrow quivers and cannot be picked up (`shakeTime`).
 const SHAKE: u32 = 7;
 /// `ClientboundGameEventPacket.PLAY_ARROW_HIT_SOUND`, for the shooter.
@@ -54,6 +60,10 @@ pub struct Shot {
     pub base_damage: f64,
     pub crit: bool,
     pub pickup: Pickup,
+    /// The arrow as an item: plain, tipped or spectral.
+    pub item: ItemStack,
+    /// The bow it came from, for its enchantments.
+    pub weapon: Option<ItemStack>,
 }
 /// Seen up to 4 chunks away, updated once a second.
 const RANGE: f64 = 4.0 * 16.0;
@@ -84,6 +94,12 @@ pub struct Arrow {
     fire: i32,
     shake: u32,
     life: u32,
+    /// What it gives back when picked up, with its potion.
+    item: ItemStack,
+    weapon: Option<ItemStack>,
+    spectral: bool,
+    /// The potion's colour, -1 for none.
+    color: i32,
     tracker: Tracker,
     sent_velocity: [f64; 3],
     data_dirty: bool,
@@ -119,7 +135,11 @@ impl Arrow {
             data: self
                 .data()
                 .into_iter()
-                .filter(|v| v.value != EntityData::Byte(0) && v.value != EntityData::Boolean(false))
+                .filter(|v| {
+                    v.value != EntityData::Byte(0)
+                        && v.value != EntityData::Boolean(false)
+                        && v.value != EntityData::Int(-1)
+                })
                 .collect(),
             equipment: Vec::new(),
             spectator: false,
@@ -144,6 +164,12 @@ impl Arrow {
                 value: EntityData::Boolean(self.stuck.is_some()),
             },
         ]
+        .into_iter()
+        .chain((!self.spectral).then_some(EntityDataValue {
+            index: EFFECT_COLOR,
+            value: EntityData::Int(self.color),
+        }))
+        .collect()
     }
 
     fn bounds(&self) -> Aabb {
@@ -173,11 +199,24 @@ fn line_hits(from: [f64; 3], to: [f64; 3], b: &Aabb, margin: f64) -> Option<f64>
 }
 
 impl Game {
-    fn arrow_type(&self) -> i32 {
-        self.context
-            .data
-            .entity_type("minecraft:arrow")
-            .unwrap_or(0)
+    fn arrow_type(&self, spectral: bool) -> i32 {
+        let name = if spectral {
+            "minecraft:spectral_arrow"
+        } else {
+            "minecraft:arrow"
+        };
+        self.context.data.entity_type(name).unwrap_or(0)
+    }
+
+    /// The colour of a tipped arrow's potion, -1 for a plain one.
+    fn arrow_color(&self, item: &ItemStack) -> i32 {
+        let data = &self.context.data;
+        match crate::stack::get(data, item, "minecraft:potion_contents") {
+            Some(contents) if contents != Nbt::Compound(Vec::new()) => {
+                super::potion::potion_color(data, &contents)
+            }
+            _ => -1,
+        }
     }
 
     /// `Projectile.shoot`: off towards `direction` at `speed` blocks a tick,
@@ -192,7 +231,17 @@ impl Game {
             base_damage,
             crit,
             pickup,
+            item,
+            weapon,
         } = shot;
+        let spectral = self
+            .context
+            .data
+            .item(item.item)
+            .is_some_and(|i| i.name == "minecraft:spectral_arrow");
+        let color = self.arrow_color(&item);
+        // `onProjectileSpawned`: flame sets it alight.
+        let fire = weapon.as_ref().map_or(0, |w| self.flame(w));
         let mut rng = rand::rng();
         let length = direction
             .iter()
@@ -216,9 +265,13 @@ impl Game {
             crit,
             pickup,
             stuck: None,
-            fire: 0,
+            fire,
             shake: 0,
             life: 0,
+            item,
+            weapon,
+            spectral,
+            color,
             tracker: Tracker::new(
                 &Pose {
                     pos: from,
@@ -235,7 +288,7 @@ impl Game {
         };
         arrow.face_velocity();
         arrow.tracker = Tracker::new(&arrow.pose(), UPDATE_INTERVAL);
-        let state = arrow.state(self.arrow_type());
+        let state = arrow.state(self.arrow_type(spectral));
         self.arrows.insert(entity_id, arrow);
         self.broadcast(None, &Outbound::EntityAdded(state));
     }
@@ -252,8 +305,13 @@ impl Game {
                     Pickup::Allowed => 1,
                     Pickup::CreativeOnly => 2,
                 };
+                let id = if a.spectral {
+                    "minecraft:spectral_arrow"
+                } else {
+                    "minecraft:arrow"
+                };
                 let mut entries = vec![
-                    ("id".to_owned(), Nbt::String("minecraft:arrow".into())),
+                    ("id".to_owned(), Nbt::String(id.into())),
                     ("Pos".into(), doubles(&a.pos)),
                     ("Motion".into(), doubles(&a.velocity)),
                     (
@@ -276,14 +334,17 @@ impl Game {
                         "SoundEvent".into(),
                         Nbt::String("minecraft:entity.arrow.hit".into()),
                     ),
-                    (
-                        "item".into(),
-                        Nbt::Compound(vec![
-                            ("id".into(), Nbt::String("minecraft:arrow".into())),
-                            ("count".into(), Nbt::Int(1)),
-                        ]),
-                    ),
                 ];
+                if let Some(item) = crate::storage::item_to_nbt(&a.item, data) {
+                    entries.push(("item".into(), item));
+                }
+                if let Some(weapon) = a
+                    .weapon
+                    .as_ref()
+                    .and_then(|w| crate::storage::item_to_nbt(w, data))
+                {
+                    entries.push(("weapon".into(), weapon));
+                }
                 if let Some((_, state)) = a.stuck {
                     entries.push(("inBlockState".into(), state_to_nbt(state, data)));
                 }
@@ -371,6 +432,24 @@ impl Game {
             head_yaw: 0.0,
             on_ground: false,
         };
+        let spectral =
+            matches!(nbt.get("id"), Some(Nbt::String(id)) if id == "minecraft:spectral_arrow");
+        let default = if spectral {
+            "minecraft:spectral_arrow"
+        } else {
+            "minecraft:arrow"
+        };
+        let item = nbt
+            .get("item")
+            .and_then(|i| crate::storage::item_from_nbt(i, &data))
+            .or_else(|| Some(crate::stack::plain(data.item_id(default)?, 1)));
+        let Some(item) = item else {
+            return;
+        };
+        let weapon = nbt
+            .get("weapon")
+            .and_then(|w| crate::storage::item_from_nbt(w, &data));
+        let color = self.arrow_color(&item);
         let mut arrow = Arrow {
             entity_id,
             uuid: uuid_from_nbt(nbt).unwrap_or_else(Uuid::new_v4),
@@ -395,23 +474,62 @@ impl Game {
                 Some(Nbt::Short(l)) => (*l).max(0) as u32,
                 _ => 0,
             },
+            item,
+            weapon,
+            spectral,
+            color,
             tracker: Tracker::new(&pose, UPDATE_INTERVAL),
             sent_velocity: velocity,
             data_dirty: false,
             state: None,
         };
-        let state = arrow.state(self.arrow_type());
+        let state = arrow.state(self.arrow_type(spectral));
         self.arrows.insert(entity_id, arrow);
         self.broadcast(None, &Outbound::EntityAdded(state));
     }
 
     /// How the arrows look now, for a player who just joined.
     pub(super) fn arrow_states(&mut self) -> Vec<Arc<EntityState>> {
-        let arrow_type = self.arrow_type();
+        let (arrow, spectral) = (self.arrow_type(false), self.arrow_type(true));
         self.arrows
             .values_mut()
-            .map(|a| a.state(arrow_type))
+            .map(|a| a.state(if a.spectral { spectral } else { arrow }))
             .collect()
+    }
+
+    /// `Entity.push`: a mob moves at once, a player's client is told.
+    pub(super) fn push_living(&mut self, entity_id: i32, by: [f64; 3]) {
+        if let Some(mob) = self.mobs.get_mut(&entity_id) {
+            for (v, d) in mob.velocity.iter_mut().zip(by) {
+                *v += d;
+            }
+            mob.mark_dirty();
+        } else if let Some(player) = self.players.get(&entity_id) {
+            player.send(Outbound::Packet(Arc::new(Encoded::new(&SetEntityMotion {
+                entity_id,
+                velocity: LpVec3(by),
+            }))));
+        }
+    }
+
+    /// `minecraft:projectile_spawned` of a weapon: flame's fire, in ticks.
+    fn flame(&self, weapon: &ItemStack) -> i32 {
+        let data = &self.context.data;
+        crate::stack::enchantments(data, weapon)
+            .into_iter()
+            .filter_map(|(name, level)| {
+                let (_, json) = data.enchantment(&name)?;
+                let effects = json["effects"]["minecraft:projectile_spawned"].as_array()?;
+                effects
+                    .iter()
+                    .filter(|e| e["effect"]["type"] == "minecraft:ignite")
+                    .map(|e| {
+                        (super::enchant::level_value(&e["effect"]["duration"], level) * 20.0) as i32
+                    })
+                    .max()
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     fn remove_arrow(&mut self, entity_id: i32) {
@@ -450,6 +568,19 @@ impl Game {
                 arrow.shake = arrow.shake.saturating_sub(1);
                 if arrow.life >= LIFETIME {
                     return self.remove_arrow(entity_id);
+                }
+                // `Arrow.tick`: the potion wears off a stuck tipped arrow.
+                if arrow.color != -1 && arrow.life >= POTION_DECAY && !arrow.spectral {
+                    arrow.color = -1;
+                    arrow.data_dirty = true;
+                    if let Some(plain) = self.context.data.item_id("minecraft:arrow") {
+                        arrow.item = crate::stack::plain(plain, 1);
+                    }
+                    let puff = Encoded::new(&ferrocraft_protocol::packets::play::EntityEvent {
+                        entity_id,
+                        event: 0,
+                    });
+                    self.broadcast(None, &Outbound::Packet(Arc::new(puff)));
                 }
                 self.pick_up_arrow(entity_id);
                 return self.sync_arrow(entity_id);
@@ -507,7 +638,7 @@ impl Game {
                     let may = shooter.is_none_or(|o| {
                         self.players.contains_key(&o) || self.rules.flag("mob_griefing")
                     });
-                    if may {
+                    if may && self.rules.flag("tnt_explodes") {
                         self.remove_block_keeping_fluid(hit.block);
                         self.prime_tnt(hit.block, shooter, super::tnt::DEFAULT_FUSE);
                     }
@@ -584,13 +715,34 @@ impl Game {
             return;
         };
         let speed = arrow.velocity.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let mut damage = (speed * arrow.base_damage)
-            .clamp(0.0, f64::from(i32::MAX))
-            .ceil() as i32;
-        if arrow.crit {
+        let weapon = arrow.weapon.clone();
+        let base = arrow.base_damage;
+        let (crit, velocity, item, spectral) = (
+            arrow.crit,
+            arrow.velocity,
+            arrow.item.clone(),
+            arrow.spectral,
+        );
+        let owner = arrow.owner;
+        // `EnchantmentHelper.modifyDamage`: power.
+        let base = weapon.as_ref().map_or(base, |w| {
+            f64::from(self.enchanted_damage(
+                w,
+                victim,
+                "minecraft:arrow",
+                owner,
+                Some(entity_id),
+                base as f32,
+            ))
+        });
+        let mut damage = (speed * base).clamp(0.0, f64::from(i32::MAX)).ceil() as i32;
+        if crit {
             damage += rand::rng().random_range(0..damage / 2 + 2);
         }
         let damage = damage as f32;
+        let Some(arrow) = self.arrows.get(&entity_id) else {
+            return;
+        };
         let (owner, at, burning) = (arrow.owner, arrow.pos, arrow.fire > 0);
         let hurt = if self.mobs.contains_key(&victim) {
             self.hurt_mob_by(
@@ -629,6 +781,48 @@ impl Game {
                 self.ignite_mob(victim, 5);
             } else {
                 self.ignite_player(victim, 5);
+            }
+        }
+        if hurt && let Some(living) = self.living(victim) {
+            // `doKnockback`: punch, along the flight.
+            let knockback = weapon.as_ref().map_or(0.0, |w| {
+                self.enchanted_knockback(w, victim, "minecraft:arrow", owner, 0.0)
+            });
+            if knockback > 0.0 {
+                let resistance =
+                    (1.0 - self.attribute(living, "minecraft:knockback_resistance")).max(0.0);
+                let length = velocity[0].hypot(velocity[2]).max(1.0e-6);
+                let push = f64::from(knockback) * 0.6 * resistance;
+                let movement = [
+                    velocity[0] / length * push,
+                    0.1,
+                    velocity[2] / length * push,
+                ];
+                self.push_living(victim, movement);
+            }
+            // Thorns and the like.
+            self.post_attack(living, owner, Some(entity_id), "minecraft:arrow");
+            // `doPostHurtEffects`: the potion of a tipped arrow, the glow of
+            // a spectral one.
+            let data = Arc::clone(&self.context.data);
+            if spectral {
+                if let Some((glowing, _)) = data.effect("minecraft:glowing") {
+                    self.add_effect(living, super::effect::EffectInstance::new(glowing, 200, 0));
+                }
+            } else if let Some(contents) =
+                crate::stack::get(&data, &item, "minecraft:potion_contents")
+            {
+                let scale = crate::stack::float(&data, &item, "minecraft:potion_duration_scale")
+                    .unwrap_or(1.0);
+                for effect in super::consume::potion_effects(&data, &contents, scale) {
+                    let info = &data.alchemy.effects[effect.effect];
+                    if info.instant {
+                        let name = info.name.clone();
+                        self.apply_instant(living, &name, effect.amplifier, 1.0, owner);
+                    } else {
+                        self.add_effect(living, effect);
+                    }
+                }
             }
         }
         if hurt {
@@ -691,14 +885,7 @@ impl Game {
             return;
         };
         if pickup == Pickup::Allowed {
-            let Some(item) = self.context.data.item_id("minecraft:arrow") else {
-                return;
-            };
-            let stack = ItemStack {
-                item,
-                count: 1,
-                patch: Default::default(),
-            };
+            let stack = arrow.item.clone();
             let mut leftover = None;
             let mut changed = Vec::new();
             self.update_inventory(taker, |inventory| {
@@ -719,7 +906,8 @@ impl Game {
     }
 
     fn sync_arrow(&mut self, entity_id: i32) {
-        let arrow_type = self.arrow_type();
+        let spectral = self.arrows.get(&entity_id).is_some_and(|a| a.spectral);
+        let arrow_type = self.arrow_type(spectral);
         let Some(arrow) = self.arrows.get_mut(&entity_id) else {
             return;
         };

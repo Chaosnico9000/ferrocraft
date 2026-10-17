@@ -98,6 +98,13 @@ pub struct Player {
     /// ticks (`clientIsFloating`, `aboveGroundTickCount`).
     pub floating: bool,
     pub floating_ticks: u32,
+    /// Status effects, and the golden hearts absorption gives.
+    pub effects: super::effect::Effects,
+    pub absorption: f32,
+    /// The attributes its client was last told of.
+    pub sent_attributes: Vec<ferrocraft_protocol::packets::play::AttributeSnapshot>,
+    /// What the enchanting table offers next (`enchantmentSeed`).
+    pub enchantment_seed: i32,
 }
 
 /// A player's experience: the level, the way to the next as a fraction,
@@ -121,6 +128,20 @@ pub struct Food {
     pub exhaustion: f32,
     /// Ticks towards the next heal or starvation damage.
     pub timer: u32,
+}
+
+impl Food {
+    /// `FoodData.add`.
+    pub fn add(&mut self, nutrition: i32, saturation: f32) {
+        self.level = (self.level + nutrition).clamp(0, 20);
+        self.saturation = (self.saturation + saturation).clamp(0.0, self.level as f32);
+    }
+
+    /// `FoodData.eat`: saturation by its modifier
+    /// (`FoodConstants.saturationByModifier`).
+    pub fn eat(&mut self, nutrition: i32, modifier: f32) {
+        self.add(nutrition, nutrition as f32 * modifier * 2.0);
+    }
 }
 
 impl Default for Food {
@@ -184,7 +205,7 @@ impl Player {
         }
     }
 
-    pub fn saved(&self) -> PlayerData {
+    pub fn saved(&self, data: &crate::data::GameData) -> PlayerData {
         PlayerData {
             pos: self.pos,
             rot: [self.yaw, self.pitch],
@@ -202,6 +223,14 @@ impl Player {
             xp_score: self.experience.score,
             fire: self.fire,
             air: self.air,
+            effects: self
+                .effects
+                .active
+                .values()
+                .filter_map(|e| e.to_nbt(data))
+                .collect(),
+            absorption: self.absorption,
+            enchantment_seed: self.enchantment_seed,
         }
     }
 
@@ -251,6 +280,12 @@ impl Player {
         if self.sprinting {
             flags |= 0x08;
         }
+        if self.effects.look.invisible {
+            flags |= 0x20;
+        }
+        if self.effects.look.glowing {
+            flags |= 0x40;
+        }
         flags
     }
 
@@ -277,6 +312,12 @@ impl Player {
             push(data_index::AIR_SUPPLY, EntityData::Int(self.air));
         }
         push(data_index::HEALTH, EntityData::Float(self.health));
+        for value in self.effects.look.data(false) {
+            push(value.index, value.value);
+        }
+        if self.absorption > 0.0 {
+            push(data_index::ABSORPTION, EntityData::Float(self.absorption));
+        }
         if self.main_hand != 1 {
             push(
                 data_index::MAIN_HAND,
@@ -297,7 +338,7 @@ impl Player {
         } else {
             EntityPose::Standing
         };
-        vec![
+        let mut values = vec![
             EntityDataValue {
                 index: data_index::SHARED_FLAGS,
                 value: EntityData::Byte(self.shared_flags()),
@@ -326,7 +367,14 @@ impl Player {
                 index: data_index::SKIN_PARTS,
                 value: EntityData::Byte(self.skin_parts),
             },
-        ]
+            EntityDataValue {
+                index: data_index::ABSORPTION,
+                value: EntityData::Float(self.absorption),
+            },
+        ];
+        values.extend(self.effects.look.data(true));
+        values.sort_by_key(|v| v.index);
+        values
     }
 
     pub fn state(&mut self, player_type: i32) -> Arc<EntityState> {

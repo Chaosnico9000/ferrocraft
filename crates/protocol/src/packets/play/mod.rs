@@ -5,6 +5,7 @@ mod block;
 mod chat;
 mod command;
 mod container;
+mod effect;
 mod entity;
 mod survival;
 
@@ -12,6 +13,7 @@ pub use block::*;
 pub use chat::*;
 pub use command::*;
 pub use container::*;
+pub use effect::*;
 pub use entity::*;
 pub use survival::*;
 

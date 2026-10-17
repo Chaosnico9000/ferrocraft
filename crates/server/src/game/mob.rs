@@ -25,6 +25,7 @@ use ferrocraft_protocol::packets::play::{
 use rand::Rng;
 use uuid::Uuid;
 
+use super::effect::Living;
 use super::path::{self, Walker};
 use super::physics;
 use super::tracker::{Pose, Tracker};
@@ -132,6 +133,12 @@ impl Kind {
         self != Kind::Creeper
     }
 
+    /// `#minecraft:undead`: harmed by healing, healed by harming, deaf to
+    /// poison and regeneration.
+    pub fn undead(self) -> bool {
+        matches!(self, Kind::Zombie | Kind::Skeleton)
+    }
+
     /// `#minecraft:burn_in_daylight`.
     fn burns_in_daylight(self) -> bool {
         matches!(self, Kind::Zombie | Kind::Skeleton)
@@ -236,8 +243,6 @@ pub struct Mob {
     eye_height: f64,
     range: f64,
     follow_range: f64,
-    armor: f32,
-    attack_damage: f32,
     goal: Goal,
     look: Look,
     navigation: Navigation,
@@ -302,6 +307,12 @@ pub struct Mob {
     sent_velocity: [f64; 3],
     data_dirty: bool,
     state: Option<Arc<EntityState>>,
+    /// Status effects and the golden hearts of absorption.
+    pub(super) effects: super::effect::Effects,
+    pub(super) absorption: f32,
+    pub(super) sent_attributes: Vec<ferrocraft_protocol::packets::play::AttributeSnapshot>,
+    /// Base values of attributes that differ from the defaults.
+    base: Vec<(&'static str, f64)>,
 }
 
 impl Mob {
@@ -344,8 +355,6 @@ impl Mob {
             eye_height: info.eye_height,
             range: f64::from(info.tracking_range * 16),
             follow_range: info.follow_range.unwrap_or(16.0),
-            armor: info.armor.unwrap_or(0.0),
-            attack_damage: info.attack_damage.unwrap_or(2.0),
             goal: Goal::Idle,
             look: Look::Ahead,
             navigation: Navigation::default(),
@@ -401,6 +410,22 @@ impl Mob {
             sent_velocity: [0.0; 3],
             data_dirty: false,
             state: None,
+            effects: Default::default(),
+            absorption: 0.0,
+            sent_attributes: Vec::new(),
+            base: [
+                ("minecraft:max_health", info.max_health.map(f64::from)),
+                ("minecraft:movement_speed", info.movement_speed),
+                ("minecraft:armor", info.armor.map(f64::from)),
+                ("minecraft:attack_damage", info.attack_damage.map(f64::from)),
+                ("minecraft:follow_range", info.follow_range),
+                ("minecraft:knockback_resistance", info.knockback_resistance),
+                ("minecraft:gravity", info.gravity),
+                ("minecraft:step_height", info.step_height),
+            ]
+            .into_iter()
+            .filter_map(|(name, value)| Some((name, value?)))
+            .collect(),
         })
     }
 
@@ -481,9 +506,36 @@ impl Mob {
         self.data_dirty = true;
     }
 
-    /// `Entity.DATA_SHARED_FLAGS_ID`: 0x01 on fire.
+    /// `Entity.DATA_SHARED_FLAGS_ID`: 0x01 on fire, 0x20 invisible, 0x40
+    /// glowing.
     fn shared_flags(&self) -> u8 {
-        u8::from(self.fire > 0)
+        let mut flags = u8::from(self.fire > 0);
+        if self.effects.look.invisible {
+            flags |= 0x20;
+        }
+        if self.effects.look.glowing {
+            flags |= 0x40;
+        }
+        flags
+    }
+
+    /// What it holds and wears, by equipment slot.
+    pub(super) fn equipment(&self) -> &[(u8, ItemStack)] {
+        &self.equipment
+    }
+
+    /// Its base value of an attribute, if it differs from the attribute's
+    /// default.
+    pub(super) fn base_attribute(&self, name: &str) -> Option<f64> {
+        match name {
+            // A baby zombie's is higher.
+            "minecraft:movement_speed" => Some(self.movement_speed),
+            _ => self.base.iter().find(|(n, _)| *n == name).map(|(_, v)| *v),
+        }
+    }
+
+    pub(super) fn is_baby(&self) -> bool {
+        self.baby
     }
 
     /// `LivingEntity.DATA_LIVING_ENTITY_FLAGS`: 0x01 using an item.
@@ -515,6 +567,9 @@ impl Mob {
             self.living_flags() != 0,
         );
         push(data_index::HEALTH, EntityData::Float(self.health), true);
+        for value in self.effects.look.data(all) {
+            push(value.index, value.value, true);
+        }
         if self.kind.hostile() {
             let flags = if self.aggressive() { 0x04 } else { 0 };
             push(MOB_FLAGS, EntityData::Byte(flags), flags != 0);
@@ -659,15 +714,8 @@ fn block_at(pos: [f64; 3]) -> BlockPos {
     }
 }
 
-/// `CombatRules.getDamageAfterAbsorb`.
-pub fn after_armor(damage: f32, armor: f32, toughness: f32) -> f32 {
-    let f = 2.0 + toughness / 4.0;
-    let r = (armor - damage / f).clamp(armor * 0.2, 20.0);
-    damage * (1.0 - r / 25.0)
-}
-
 impl Game {
-    fn broadcast_mob(&mut self, entity_id: i32, packets: Vec<Encoded>) {
+    pub(super) fn broadcast_mob(&mut self, entity_id: i32, packets: Vec<Encoded>) {
         let Some(mob) = self.mobs.get_mut(&entity_id) else {
             return;
         };
@@ -883,6 +931,7 @@ impl Game {
     fn move_mob(&mut self, entity_id: i32) {
         let data = Arc::clone(&self.context.data);
         let world = Arc::clone(&self.context.world);
+        let movement_speed = self.attribute(Living::Mob(entity_id), "minecraft:movement_speed");
         let Some(mob) = self.mobs.get_mut(&entity_id) else {
             return;
         };
@@ -900,7 +949,7 @@ impl Game {
         if speed > 0.0 {
             // `Mob.setSpeed`: the forward input and the walking speed both
             // are the goal's factor times `movement_speed`.
-            let forward = speed * mob.movement_speed;
+            let forward = speed * movement_speed;
             let amount = if mob.on_ground {
                 forward * (GROUND_ACCELERATION / (friction * friction * friction))
             } else {
@@ -1027,6 +1076,9 @@ impl Game {
         if burn {
             self.hurt_mob(entity_id, 1.0, None, "minecraft:on_fire");
         }
+        if self.mobs.get(&entity_id).is_some_and(Mob::alive) {
+            self.tick_effects(Living::Mob(entity_id));
+        }
     }
 
     /// Sets a mob alight for `seconds` (`Entity.igniteForSeconds`).
@@ -1104,23 +1156,26 @@ impl Game {
         let source_type = data
             .registry_id("minecraft:damage_type", damage_type)
             .unwrap_or(0);
-        let armored = !data.tag_contains(
-            "minecraft:damage_type",
-            "minecraft:bypasses_armor",
-            source_type,
-        );
         let by_player = attacker.filter(|id| self.players.contains_key(id));
         let tick = self.tick;
-        let Some(mob) = self.mobs.get_mut(&entity_id) else {
+        let Some(mob) = self.mobs.get(&entity_id) else {
             return false;
         };
         if !mob.alive() || mob.invulnerable > HURT_COOLDOWN / 2 {
             return false;
         }
-        let amount = if armored {
-            after_armor(amount, mob.armor, 0.0)
-        } else {
-            amount
+        if self.immune_to(Living::Mob(entity_id), damage_type) {
+            return false;
+        }
+        let amount = self.absorb_damage(
+            Living::Mob(entity_id),
+            amount,
+            damage_type,
+            attacker,
+            from.map(|(id, _)| id).or(attacker),
+        );
+        let Some(mob) = self.mobs.get_mut(&entity_id) else {
+            return false;
         };
         mob.health = (mob.health - amount).max(0.0);
         mob.invulnerable = HURT_COOLDOWN;
@@ -1196,7 +1251,7 @@ impl Game {
         let experience = mob.experience(&mut rand::rng());
         // `shouldDropLoot` and `shouldDropExperience`: baby animals leave
         // nothing; monsters always do.
-        let leaves = !(mob.baby && !mob.kind.hostile());
+        let leaves = !(mob.baby && !mob.kind.hostile()) && self.rules.flag("mob_drops");
         let death = Encoded::new(&EntityEvent {
             entity_id,
             event: 3,
@@ -1233,10 +1288,14 @@ impl Game {
     /// Extra knockback in the direction a sprinting attacker looks
     /// (`Player.causeExtraKnockback`).
     pub(super) fn push_mob(&mut self, entity_id: i32, yaw: f64, strength: f64) {
+        let resistance = self.attribute(Living::Mob(entity_id), "minecraft:knockback_resistance");
         let Some(mob) = self.mobs.get_mut(&entity_id) else {
             return;
         };
-        let s = strength * 0.5;
+        let s = strength * (1.0 - resistance);
+        if s <= 0.0 {
+            return;
+        }
         mob.velocity = [
             mob.velocity[0] / 2.0 - yaw.sin() * s,
             if mob.on_ground {

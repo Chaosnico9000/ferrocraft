@@ -116,7 +116,11 @@ impl Game {
             new[4] + 0.0625,
             new[5] + 0.0625,
         ];
-        let floating = !moved.on_ground && !may_fly && self.only_air_in(around);
+        let levitating = self.has_effect(
+            super::effect::Living::Player(entity_id),
+            "minecraft:levitation",
+        );
+        let floating = !moved.on_ground && !may_fly && !levitating && self.only_air_in(around);
         if let Some(player) = self.players.get_mut(&entity_id) {
             player.floating = floating;
         }

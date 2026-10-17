@@ -225,7 +225,16 @@ impl Game {
 
     /// `Block.popResource`: a drop at a random spot in the block, flung up a
     /// little.
+    /// `Block.popResource`: a block's drop, if blocks drop at all
+    /// (`block_drops`).
     pub(super) fn pop_resource(&mut self, pos: BlockPos, stack: ItemStack) {
+        if self.rules.flag("block_drops") {
+            self.drop_at_block(pos, stack);
+        }
+    }
+
+    /// `Containers.dropItemStack` at a block, whatever the rules.
+    pub(super) fn drop_at_block(&mut self, pos: BlockPos, stack: ItemStack) {
         let jitter = || rand::random::<f64>() * 0.5 - 0.25;
         let at = [
             f64::from(pos.x) + 0.5 + jitter(),

@@ -14,6 +14,7 @@ use ferrocraft_protocol::Nbt;
 use ferrocraft_protocol::chunk::{
     BIOMES_PER_SECTION, BLOCKS_PER_SECTION, LIGHT_LAYER_LEN, LightData, bits_for, pack_bits,
 };
+use ferrocraft_protocol::component;
 use ferrocraft_protocol::packets::play::{ComponentPatch, ItemStack};
 use flate2::Compression;
 use flate2::read::{GzDecoder, ZlibDecoder};
@@ -761,6 +762,11 @@ pub struct PlayerData {
     /// Ticks left burning (`Fire`) and breath left (`Air`).
     pub fire: i32,
     pub air: i32,
+    /// Status effects as saved (`active_effects`), and the golden hearts.
+    pub effects: Vec<Nbt>,
+    pub absorption: f32,
+    /// What the enchanting table offers next (`XpSeed`).
+    pub enchantment_seed: i32,
 }
 
 /// A player's full health.
@@ -806,7 +812,7 @@ impl PlayerData {
                 Some(item)
             })
             .collect();
-        Nbt::Compound(vec![
+        let mut entries = vec![
             ("DataVersion".into(), Nbt::Int(DATA_VERSION)),
             (
                 "Pos".into(),
@@ -839,7 +845,13 @@ impl PlayerData {
                 "Air".into(),
                 Nbt::Short(self.air.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16),
             ),
-        ])
+            ("AbsorptionAmount".into(), Nbt::Float(self.absorption)),
+            ("XpSeed".into(), Nbt::Int(self.enchantment_seed)),
+        ];
+        if !self.effects.is_empty() {
+            entries.push(("active_effects".into(), Nbt::List(self.effects.clone())));
+        }
+        Nbt::Compound(entries)
     }
 
     fn from_nbt(nbt: &Nbt, data: &GameData) -> Self {
@@ -907,8 +919,9 @@ impl PlayerData {
                 _ => 0,
             },
             ender,
+            // Health boost may have raised it above twenty.
             health: match nbt.get("Health") {
-                Some(Nbt::Float(health)) if health.is_finite() => health.clamp(0.0, MAX_HEALTH),
+                Some(Nbt::Float(health)) if health.is_finite() => health.clamp(0.0, 1024.0),
                 _ => MAX_HEALTH,
             },
             xp_level: int_or_zero(nbt, "XpLevel").max(0),
@@ -926,6 +939,15 @@ impl PlayerData {
                 Some(Nbt::Short(air)) => i32::from(*air),
                 _ => MAX_AIR,
             },
+            effects: match nbt.get("active_effects") {
+                Some(Nbt::List(effects)) => effects.clone(),
+                _ => Vec::new(),
+            },
+            absorption: match nbt.get("AbsorptionAmount") {
+                Some(Nbt::Float(a)) if a.is_finite() => a.max(0.0),
+                _ => 0.0,
+            },
+            enchantment_seed: int_or_zero(nbt, "XpSeed"),
         }
     }
 }
@@ -955,39 +977,45 @@ fn saved_slot_to_menu(slot: i8) -> Option<usize> {
     }
 }
 
-/// An item as vanilla saves it, `{id, count}`. Components are kept in their
-/// network form under a key vanilla ignores: turning them into NBT would need
-/// a codec for every component type.
+/// An item as vanilla saves it: `{id, count, components}`, the components
+/// that differ from the item's defaults by name, those it lacks as
+/// `"!name": {}`. Components Ferrocraft has no shape for stay in their wire
+/// form under a key vanilla ignores.
 pub(crate) fn item_to_nbt(stack: &ItemStack, data: &GameData) -> Option<Nbt> {
     let id = &data.item(stack.item)?.name;
     let mut entries = vec![
         ("id".to_owned(), Nbt::String(id.clone())),
         ("count".into(), Nbt::Int(stack.count)),
     ];
-    let patch = &stack.patch;
-    if !patch.added.is_empty() || !patch.removed.is_empty() {
-        entries.push((
-            "ferrocraft:components".into(),
-            Nbt::List(
-                patch
-                    .added
-                    .iter()
-                    .map(|(kind, bytes)| {
-                        Nbt::Compound(vec![
-                            ("type".into(), Nbt::Int(*kind)),
-                            (
-                                "data".into(),
-                                Nbt::ByteArray(bytes.iter().map(|&b| b as i8).collect()),
-                            ),
-                        ])
-                    })
-                    .collect(),
-            ),
-        ));
-        entries.push((
-            "ferrocraft:removed".into(),
-            Nbt::IntArray(patch.removed.clone()),
-        ));
+    let names = data.static_registry("minecraft:data_component_type")?;
+    let mut components = Vec::new();
+    let mut opaque = Vec::new();
+    for (kind, bytes) in &stack.patch.added {
+        let saved = names.get(*kind as usize).and_then(|name| {
+            let value = component::component(name)?.from_wire(bytes, data).ok()?;
+            Some((name.clone(), value))
+        });
+        match saved {
+            Some(entry) => components.push(entry),
+            None => opaque.push(Nbt::Compound(vec![
+                ("type".into(), Nbt::Int(*kind)),
+                (
+                    "data".into(),
+                    Nbt::ByteArray(bytes.iter().map(|&b| b as i8).collect()),
+                ),
+            ])),
+        }
+    }
+    for kind in &stack.patch.removed {
+        if let Some(name) = names.get(*kind as usize) {
+            components.push((format!("!{name}"), Nbt::Compound(Vec::new())));
+        }
+    }
+    if !components.is_empty() {
+        entries.push(("components".into(), Nbt::Compound(components)));
+    }
+    if !opaque.is_empty() {
+        entries.push(("ferrocraft:components".into(), Nbt::List(opaque)));
     }
     Some(Nbt::Compound(entries))
 }
@@ -1001,27 +1029,59 @@ pub(crate) fn item_from_nbt(nbt: &Nbt, data: &GameData) -> Option<ItemStack> {
         Some(Nbt::Int(count)) if *count > 0 => *count,
         _ => 1,
     };
-    let added = match nbt.get("ferrocraft:components") {
-        Some(Nbt::List(list)) => list
-            .iter()
-            .filter_map(|c| match (c.get("type"), c.get("data")) {
-                (Some(Nbt::Int(kind)), Some(Nbt::ByteArray(bytes))) => {
-                    Some((*kind, bytes.iter().map(|&b| b as u8).collect()))
+    let mut patch = ComponentPatch::default();
+    if let Some(Nbt::Compound(components)) = nbt.get("components") {
+        for (name, value) in components {
+            if let Some(removed) = name.strip_prefix('!') {
+                if let Ok(kind) = data.data_component_type(&qualified(removed)) {
+                    patch.removed.push(kind);
                 }
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
-    let removed = match nbt.get("ferrocraft:removed") {
-        Some(Nbt::IntArray(removed)) => removed.clone(),
-        _ => Vec::new(),
-    };
-    Some(ItemStack {
-        item,
-        count,
-        patch: ComponentPatch { added, removed },
-    })
+                continue;
+            }
+            let name = qualified(name);
+            let wire = data.data_component_type(&name).ok().and_then(|kind| {
+                let bytes = component::component(&name)?.to_wire(value, data).ok()?;
+                Some((kind, bytes))
+            });
+            match wire {
+                Some(entry) => patch.added.push(entry),
+                None => debug!(%name, "dropping a component Ferrocraft cannot read"),
+            }
+        }
+    }
+    // Ferrocraft's own form, for what it has no shape for, and as earlier
+    // versions saved everything.
+    if let Some(Nbt::List(list)) = nbt.get("ferrocraft:components") {
+        for c in list {
+            if let (Some(Nbt::Int(kind)), Some(Nbt::ByteArray(bytes))) =
+                (c.get("type"), c.get("data"))
+                && !patch.added.iter().any(|(t, _)| t == kind)
+            {
+                patch
+                    .added
+                    .push((*kind, bytes.iter().map(|&b| b as u8).collect()));
+            }
+        }
+    }
+    if let Some(Nbt::IntArray(removed)) = nbt.get("ferrocraft:removed") {
+        for kind in removed {
+            if !patch.removed.contains(kind) {
+                patch.removed.push(*kind);
+            }
+        }
+    }
+    let mut stack = ItemStack { item, count, patch };
+    crate::stack::normalize(&mut stack);
+    Some(stack)
+}
+
+/// `minecraft:` in front of a name without a namespace.
+fn qualified(name: &str) -> String {
+    if name.contains(':') {
+        name.to_owned()
+    } else {
+        format!("minecraft:{name}")
+    }
 }
 
 #[cfg(test)]
@@ -1264,6 +1324,13 @@ mod tests {
             xp_score: 91,
             fire: 37,
             air: 120,
+            effects: vec![Nbt::Compound(vec![
+                ("id".into(), Nbt::String("minecraft:speed".into())),
+                ("duration".into(), Nbt::Int(600)),
+                ("show_icon".into(), Nbt::Byte(1)),
+            ])],
+            absorption: 4.0,
+            enchantment_seed: -12345,
             inventory: vec![
                 (36, stack(1, 64)),
                 (20, stack(2, 3)),
@@ -1271,17 +1338,39 @@ mod tests {
                 (
                     5,
                     ItemStack {
-                        item: 3,
+                        item: data.item_id("minecraft:diamond_helmet").unwrap(),
                         count: 1,
+                        // Damage and enchantments as vanilla saves them,
+                        // custom model data in Ferrocraft's own form, no
+                        // repair cost.
                         patch: ComponentPatch {
-                            added: vec![(17, vec![1, 2, 3])],
-                            removed: vec![4],
+                            added: vec![
+                                (
+                                    data.data_component_type("minecraft:damage").unwrap(),
+                                    vec![9],
+                                ),
+                                (
+                                    data.data_component_type("minecraft:enchantments").unwrap(),
+                                    vec![1, 9, 3],
+                                ),
+                                (17, vec![1, 2, 3]),
+                            ],
+                            removed: vec![
+                                data.data_component_type("minecraft:repair_cost").unwrap(),
+                            ],
                         },
                     },
                 ),
             ],
         };
         storage.save_player(uuid, &player, &data).unwrap();
+        // Readable by vanilla: the components by name.
+        let saved = read_nbt_file(&storage.player_path(uuid)).unwrap().unwrap();
+        let helmet = saved.get("equipment").and_then(|e| e.get("head")).unwrap();
+        let components = helmet.get("components").unwrap();
+        assert_eq!(components.get("minecraft:damage"), Some(&Nbt::Int(9)));
+        assert!(components.get("minecraft:enchantments").is_some());
+        assert!(components.get("!minecraft:repair_cost").is_some());
         let mut loaded = storage.load_player(uuid, &data).unwrap().unwrap();
         loaded.inventory.sort_by_key(|(slot, _)| *slot);
         let mut expected = player.clone();

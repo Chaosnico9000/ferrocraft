@@ -15,15 +15,15 @@ use ferrocraft_protocol::packets::play::{
     AcceptTeleportation, AddEntity, Attack, BlockChangedAck, BlockUpdate, BundleDelimiter,
     CLIENT_COMMAND_RESPAWN, ChangeGameMode, Chat, ChatCommand, ChunkBatchFinished,
     ChunkBatchReceived, ChunkBatchStart, ClientCommand, ClientInformation, ClientTickEnd,
-    ClientboundKeepAlive, ContainerClick, ContainerSetContent, Disconnect, EntityData,
-    EntityDataValue, EntityDataValues, EntityEvent, EntityIds, ForgetLevelChunk, GameEvent,
-    GameEventKind, GameMode, Interact, Login, LpVec3, MovePlayer, PERMISSION_LEVEL_EVENT,
-    PickItemFromBlock, PlayerAction, PlayerCommand, PlayerInfoEntry, PlayerInfoRemove,
-    PlayerInfoUpdate, PlayerInput, PlayerLoaded, PlayerPosition, Punch, RemoveEntities, Respawn,
-    ServerboundContainerClose, ServerboundKeepAlive, ServerboundPlayerAbilities, SetCarriedItem,
-    SetChunkCacheCenter, SetCreativeModeSlot, SetDefaultSpawnPosition, SetEntityData, SetEquipment,
-    SetHeldSlot, SignUpdate, Slot, Slots, SpawnInfo, UseItem, UseItemOn, data_index,
-    player_command,
+    ClientboundKeepAlive, ContainerButtonClick, ContainerClick, ContainerSetContent, Disconnect,
+    EntityData, EntityDataValue, EntityDataValues, EntityEvent, EntityIds, ForgetLevelChunk,
+    GameEvent, GameEventKind, GameMode, Interact, Login, LpVec3, MovePlayer,
+    PERMISSION_LEVEL_EVENT, PickItemFromBlock, PlayerAction, PlayerCommand, PlayerInfoEntry,
+    PlayerInfoRemove, PlayerInfoUpdate, PlayerInput, PlayerLoaded, PlayerPosition, Punch,
+    RemoveEntities, RenameItem, Respawn, ServerboundContainerClose, ServerboundKeepAlive,
+    ServerboundPlayerAbilities, SetCarriedItem, SetChunkCacheCenter, SetCreativeModeSlot,
+    SetDefaultSpawnPosition, SetEntityData, SetEquipment, SetHeldSlot, SignUpdate, Slot, Slots,
+    SpawnInfo, UseItem, UseItemOn, data_index, player_command,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tracing::debug;
@@ -131,6 +131,10 @@ pub async fn handle(
     let (fire, air) = saved
         .as_ref()
         .map_or((0, crate::storage::MAX_AIR), |s| (s.fire, s.air));
+    let (effects, absorption, enchantment_seed) = saved.as_ref().map_or_else(
+        || (Vec::new(), 0.0, rand::random()),
+        |s| (s.effects.clone(), s.absorption, s.enchantment_seed),
+    );
     let experience = saved
         .as_ref()
         .map_or_else(game::Experience::default, |s| game::Experience {
@@ -171,6 +175,9 @@ pub async fn handle(
         experience,
         fire,
         air,
+        effects,
+        absorption,
+        enchantment_seed,
         skin_parts: information.as_ref().map_or(0, |i| i.model_customisation),
         main_hand: information.as_ref().map_or(1, |i| i.main_hand),
         outbound,
@@ -516,6 +523,18 @@ impl Session<'_> {
             SignUpdate::ID => {
                 let update = SignUpdate::from_raw(raw)?;
                 self.event(Event::SignUpdate { entity_id, update });
+            }
+            ContainerButtonClick::ID => {
+                let click = ContainerButtonClick::from_raw(raw)?;
+                self.event(Event::MenuButton {
+                    entity_id,
+                    container_id: click.container_id,
+                    button: click.button,
+                });
+            }
+            RenameItem::ID => {
+                let name = RenameItem::from_raw(raw)?.name;
+                self.event(Event::RenameItem { entity_id, name });
             }
             PickItemFromBlock::ID => {
                 let pick = PickItemFromBlock::from_raw(raw)?;

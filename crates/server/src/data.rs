@@ -23,6 +23,8 @@ const ENTITIES: &str = include_str!("../../../data/26.3/entities.json");
 const FEATURES: &str = include_str!("../../../data/26.3/features.json");
 /// The English texts of the server jar, for the console.
 const LANGUAGE: &str = include_str!("../../../data/26.3/en_us.json");
+const ALCHEMY: &str = include_str!("../../../data/26.3/alchemy.json");
+const ENCHANTMENTS: &str = include_str!("../../../data/26.3/enchantments.json");
 
 #[derive(Deserialize)]
 struct SyncedRegistry {
@@ -195,6 +197,10 @@ pub struct Block {
     /// burn odds).
     #[serde(default)]
     pub fire: Option<[i32; 2]>,
+    /// Experience when mined with the right tool, at least and at most
+    /// (`DropExperienceBlock.xpRange`).
+    #[serde(default)]
+    pub xp: Option<[i32; 2]>,
     /// One entry for all states, or one per state.
     states: Vec<StatePhysics>,
 }
@@ -224,9 +230,15 @@ pub struct Item {
     /// As fuel: ticks it burns and how much faster it cooks, in a furnace
     /// and in a smoker or blast furnace.
     pub fuel: Option<[(i32, f32); 2]>,
+    /// In a brewing stand (`brewing_fuel`): brews per item and their speed.
+    pub brewing_fuel: Option<(i32, f32)>,
     /// What using it on a block turns the block into, such as
     /// `minecraft:hoe` (see [`Features::block_transformers`]).
     pub block_transformer: Option<String>,
+    /// Further default components as vanilla's report has them, by name
+    /// without `minecraft:` (`consumable`, `enchantable`, ...).
+    #[serde(default)]
+    pub components: HashMap<String, serde_json::Value>,
 }
 
 /// Data pack content that grows and changes blocks, as
@@ -237,6 +249,79 @@ pub struct Features {
     pub trees: HashMap<String, serde_json::Value>,
     pub block_state_providers: HashMap<String, serde_json::Value>,
     pub block_transformers: HashMap<String, serde_json::Value>,
+}
+
+/// Status effects, potions and attributes, as `scripts/Alchemy.java` read
+/// them from vanilla, each in network-id order.
+#[derive(Debug, Deserialize)]
+pub struct Alchemy {
+    pub effects: Vec<EffectInfo>,
+    pub potions: Vec<PotionInfo>,
+    pub attributes: Vec<AttributeInfo>,
+}
+
+/// A status effect (`MobEffect`).
+#[derive(Debug, Deserialize)]
+pub struct EffectInfo {
+    pub name: String,
+    /// `beneficial`, `harmful` or `neutral`.
+    pub category: String,
+    pub color: i32,
+    /// Happens at once, like healing (`isInstantaneous`).
+    pub instant: bool,
+    /// Attribute modifiers at level I; each level adds the amount again.
+    pub modifiers: Vec<EffectModifier>,
+    /// The particle it shows, coloured with [`Self::color`] if
+    /// `colored_particle`.
+    pub particle: String,
+    pub colored_particle: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EffectModifier {
+    pub attribute: String,
+    pub id: String,
+    pub amount: f64,
+    /// `add_value`, `add_multiplied_base` or `add_multiplied_total`.
+    pub operation: String,
+}
+
+/// A potion (`Potion`): its effects, and the name its texts go by.
+#[derive(Debug, Deserialize)]
+pub struct PotionInfo {
+    pub name: String,
+    pub base: String,
+    pub effects: Vec<PotionEffect>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PotionEffect {
+    pub id: String,
+    pub amplifier: i32,
+    pub duration: i32,
+}
+
+/// An attribute (`RangedAttribute`).
+#[derive(Debug, Deserialize)]
+pub struct AttributeInfo {
+    pub name: String,
+    pub default: f64,
+    #[serde(default = "f64_min")]
+    pub min: f64,
+    #[serde(default = "f64_max")]
+    pub max: f64,
+    /// Clients hear of it (`isClientSyncable`).
+    pub sync: bool,
+    /// A player's base value, if players have it.
+    pub player: Option<f64>,
+}
+
+fn f64_min() -> f64 {
+    f64::MIN
+}
+
+fn f64_max() -> f64 {
+    f64::MAX
 }
 
 /// An entity type as `scripts/EntityInfo.java` read it from vanilla.
@@ -320,6 +405,9 @@ struct Ids {
     data_component_type: Vec<String>,
     sound_event: Vec<String>,
     particle_type: Vec<String>,
+    mob_effect: Vec<String>,
+    potion: Vec<String>,
+    attribute: Vec<String>,
 }
 
 impl Block {
@@ -418,6 +506,10 @@ pub struct GameData {
     block_tags: HashMap<String, Vec<u64>>,
     /// Translation keys and their English text (`en_us.json`).
     pub language: HashMap<String, String>,
+    pub alchemy: Alchemy,
+    /// The enchantments as vanilla's data pack has them, in network-id
+    /// order, each with its `name`.
+    pub enchantments: Vec<serde_json::Value>,
 }
 
 impl GameData {
@@ -502,6 +594,9 @@ impl GameData {
             features: serde_json::from_str(FEATURES).context("parsing features.json")?,
             block_tags: HashMap::new(),
             language: serde_json::from_str(LANGUAGE).context("parsing en_us.json")?,
+            alchemy: serde_json::from_str(ALCHEMY).context("parsing alchemy.json")?,
+            enchantments: serde_json::from_str(ENCHANTMENTS)
+                .context("parsing enchantments.json")?,
         };
         let words = data.blocks.len().div_ceil(64);
         if let Some(blocks) = data
@@ -598,8 +693,55 @@ impl GameData {
         Ok((id, info))
     }
 
+    /// A status effect and its network id.
+    pub fn effect(&self, name: &str) -> Option<(usize, &EffectInfo)> {
+        self.alchemy
+            .effects
+            .iter()
+            .enumerate()
+            .find(|(_, e)| e.name == name)
+    }
+
+    pub fn potion(&self, name: &str) -> Option<&PotionInfo> {
+        self.alchemy.potions.iter().find(|p| p.name == name)
+    }
+
+    pub fn attribute(&self, name: &str) -> Option<(usize, &AttributeInfo)> {
+        self.alchemy
+            .attributes
+            .iter()
+            .enumerate()
+            .find(|(_, a)| a.name == name)
+    }
+
+    /// An enchantment as the data pack has it, with its network id.
+    pub fn enchantment(&self, name: &str) -> Option<(usize, &serde_json::Value)> {
+        self.enchantments
+            .iter()
+            .enumerate()
+            .find(|(_, e)| e["name"] == name)
+    }
+
     pub fn data_component_type(&self, name: &str) -> anyhow::Result<i32> {
         position(&self.ids.data_component_type, name)
+    }
+
+    /// The entries of a registry that is not synchronized but built into
+    /// the game, in network-id order.
+    pub fn static_registry(&self, registry: &str) -> Option<&[String]> {
+        let ids = &self.ids;
+        Some(match registry {
+            "minecraft:entity_type" => &ids.entity_type,
+            "minecraft:block_entity_type" => &ids.block_entity_type,
+            "minecraft:menu" => &ids.menu,
+            "minecraft:data_component_type" => &ids.data_component_type,
+            "minecraft:sound_event" => &ids.sound_event,
+            "minecraft:particle_type" => &ids.particle_type,
+            "minecraft:mob_effect" => &ids.mob_effect,
+            "minecraft:potion" => &ids.potion,
+            "minecraft:attribute" => &ids.attribute,
+            _ => return None,
+        })
     }
 
     /// Whether a block is in a tool rule's or loot predicate's set: a

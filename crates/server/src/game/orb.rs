@@ -9,7 +9,7 @@ use ferrocraft_protocol::Nbt;
 use ferrocraft_protocol::codec::BlockPos;
 use ferrocraft_protocol::packets::play::{
     EntityData, EntityDataValue, GameMode, LpVec3, SOUND_SOURCE_PLAYERS, SetEntityMotion,
-    SetExperience, TakeItemEntity,
+    SetExperience, TakeItemEntity, equipment_slot,
 };
 use rand::Rng;
 use uuid::Uuid;
@@ -369,7 +369,11 @@ impl Game {
             amount: 1,
         });
         self.broadcast_orb(entity_id, vec![take]);
-        self.give_experience(taker, value);
+        // Mending takes its part first.
+        let left = self.repair_with_experience(taker, value);
+        if left > 0 {
+            self.give_experience(taker, left);
+        }
         if let Some(orb) = self.orbs.get_mut(&entity_id) {
             orb.count -= 1;
             if orb.count <= 0 {
@@ -409,6 +413,66 @@ impl Game {
 
     /// `Player.giveExperiencePoints`: points towards the next level, a
     /// fanfare every five levels.
+    /// `ExperienceOrb.repairPlayerItems`: a random damaged piece with
+    /// mending, among what the player holds and wears, takes the points
+    /// first, two durability for each; what is left over.
+    fn repair_with_experience(&mut self, entity_id: i32, amount: i32) -> i32 {
+        let data = Arc::clone(&self.context.data);
+        let Some(player) = self.players.get(&entity_id) else {
+            return amount;
+        };
+        let selected = player.inventory.selected_slot();
+        let mut candidates = Vec::new();
+        for (slot, menu_slot) in [
+            (equipment_slot::MAIN_HAND, selected),
+            (equipment_slot::OFF_HAND, crate::inventory::OFF_HAND),
+            (equipment_slot::FEET, 8),
+            (equipment_slot::LEGS, 7),
+            (equipment_slot::CHEST, 6),
+            (equipment_slot::HEAD, 5),
+        ] {
+            let Some(stack) = player.inventory.get(menu_slot) else {
+                continue;
+            };
+            if !crate::stack::damageable(&data, stack) || crate::stack::damage(&data, stack) == 0 {
+                continue;
+            }
+            for (name, _) in crate::stack::enchantments(&data, stack) {
+                if let Some((_, json)) = data.enchantment(&name)
+                    && !json["effects"]["minecraft:repair_with_xp"].is_null()
+                    && super::enchant::applies_in(json, slot)
+                {
+                    candidates.push(menu_slot);
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return amount;
+        }
+        let slot = candidates[rand::random_range(0..candidates.len())];
+        let Some(mut stack) = player.inventory.get(slot).cloned() else {
+            return amount;
+        };
+        let to_repair = self.repair_from_xp(&stack, amount);
+        let damage = crate::stack::damage(&data, &stack);
+        let repair = to_repair.min(damage);
+        crate::stack::set(
+            &data,
+            &mut stack,
+            "minecraft:damage",
+            &Nbt::Int(damage - repair),
+        );
+        self.update_inventory(entity_id, |inventory| inventory.set(slot, Some(stack)));
+        self.send_slots(entity_id, &[slot]);
+        if repair > 0 && to_repair > 0 {
+            let remaining = amount - repair * amount / to_repair;
+            if remaining > 0 {
+                return self.repair_with_experience(entity_id, remaining);
+            }
+        }
+        0
+    }
+
     pub(super) fn give_experience(&mut self, entity_id: i32, points: i32) {
         let tick = self.tick;
         let Some(player) = self.players.get_mut(&entity_id) else {

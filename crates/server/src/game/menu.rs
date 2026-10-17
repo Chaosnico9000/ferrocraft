@@ -1,6 +1,6 @@
 //! Container screens (`AbstractContainerMenu`): the player's inventory, chests,
-//! barrels, dispensers, hoppers, the ender chest, the crafting table and
-//! furnaces.
+//! barrels, dispensers, hoppers, the ender chest, the crafting table,
+//! furnaces, brewing stands, the enchanting table, anvils and grindstones.
 //! Clicks follow vanilla's `doClick`; afterwards the client gets the true
 //! content of the screen, whatever it predicted.
 
@@ -49,20 +49,52 @@ pub struct Menu {
     pub block: Option<usize>,
     /// What [`quick_move`](Game::quick_move) does for this kind of screen.
     kind: Kind,
-    /// A furnace screen: where the furnace is, and the fire and progress
-    /// the client was last told.
+    /// A furnace or brewing stand screen: where the block is, and the data
+    /// slots the client was last told.
     pub furnace: Option<BlockPos>,
     pub sent_data: Vec<i32>,
+    /// What a workstation offers.
+    pub extra: Extra,
+    /// A workstation's result was just taken.
+    pub taken: Option<Taken>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(super) enum Kind {
     Inventory,
     /// `n` container slots, then the player's inventory.
     Container(usize),
     Crafting,
     /// Ingredient, fuel, result, then the player's inventory.
     Furnace(Cooker),
+    /// Three bottles, reagent, fuel.
+    Brewing,
+    /// Item and lapis.
+    Enchanting,
+    /// Two inputs and the result.
+    Anvil,
+    Grindstone,
+}
+
+/// What a workstation screen offers for its items.
+#[derive(Debug, Clone, Default)]
+pub enum Extra {
+    #[default]
+    None,
+    Enchanting(super::enchanting::Offers),
+    Anvil {
+        /// What the name field says.
+        name: Option<String>,
+        result: super::enchanting::AnvilResult,
+    },
+    Grindstone(Option<ItemStack>),
+}
+
+/// The price of a workstation's result, paid once it was taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Taken {
+    Anvil { cost: i32 },
+    Grindstone { experience: i32 },
 }
 
 /// A drag across slots (`QUICK_CRAFT`) in progress.
@@ -95,6 +127,8 @@ impl Menu {
             kind: Kind::Inventory,
             furnace: None,
             sent_data: Vec::new(),
+            extra: Extra::None,
+            taken: None,
         }
     }
 
@@ -117,6 +151,8 @@ impl Menu {
             kind: Kind::Container(size),
             furnace: None,
             sent_data: Vec::new(),
+            extra: Extra::None,
+            taken: None,
         }
     }
 
@@ -134,7 +170,61 @@ impl Menu {
             kind: Kind::Furnace(cooker),
             furnace: Some(at),
             sent_data: Vec::new(),
+            extra: Extra::None,
+            taken: None,
         }
+    }
+
+    /// `BrewingStandMenu`.
+    pub fn brewing(id: i32, at: BlockPos) -> Self {
+        let mut slots: Vec<Source> = (0..5).map(|i| Source::Container(at, i)).collect();
+        slots.extend(player_slots());
+        Self {
+            id,
+            slots,
+            grid: Vec::new(),
+            containers: vec![at],
+            at: Some(at),
+            block: None,
+            kind: Kind::Brewing,
+            furnace: Some(at),
+            sent_data: Vec::new(),
+            extra: Extra::None,
+            taken: None,
+        }
+    }
+
+    /// The enchanting table, an anvil or a grindstone: two slots of its
+    /// own, the result after them but at the table.
+    pub(super) fn workstation(id: i32, at: BlockPos, kind: Kind) -> Self {
+        let mut slots = vec![Source::Grid(0), Source::Grid(1)];
+        if kind != Kind::Enchanting {
+            slots.push(Source::Result);
+        }
+        slots.extend(player_slots());
+        Self {
+            id,
+            slots,
+            grid: vec![None; 2],
+            containers: Vec::new(),
+            at: Some(at),
+            block: None,
+            kind,
+            furnace: None,
+            sent_data: Vec::new(),
+            extra: match kind {
+                Kind::Anvil => Extra::Anvil {
+                    name: None,
+                    result: Default::default(),
+                },
+                _ => Extra::None,
+            },
+            taken: None,
+        }
+    }
+
+    pub(super) fn kind(&self) -> Kind {
+        self.kind
     }
 
     pub fn crafting(id: i32, at: BlockPos) -> Self {
@@ -151,6 +241,8 @@ impl Menu {
             kind: Kind::Crafting,
             furnace: None,
             sent_data: Vec::new(),
+            extra: Extra::None,
+            taken: None,
         }
     }
 
@@ -158,7 +250,7 @@ impl Menu {
         match self.kind {
             Kind::Inventory => 2,
             Kind::Crafting => 3,
-            Kind::Container(_) | Kind::Furnace(_) => 0,
+            _ => 0,
         }
     }
 }
@@ -223,6 +315,24 @@ impl View<'_> {
         }
     }
 
+    /// `ArmorSlot.mayPickup`: the curse of binding keeps armor on, except
+    /// in creative.
+    fn may_pickup(&self, slot: usize) -> bool {
+        match self.source(slot) {
+            Some(Source::Player(5..=8)) => {
+                self.player.game_mode() == GameMode::Creative
+                    || self.get(slot).is_none_or(|stack| {
+                        !super::enchant::has_effect(
+                            self.data,
+                            &stack,
+                            "minecraft:prevent_armor_change",
+                        )
+                    })
+            }
+            _ => true,
+        }
+    }
+
     /// `Slot.mayPlace`: armor slots take only what is worn there, shulker
     /// boxes no shulker boxes, results nothing.
     fn allows(&self, slot: usize, stack: &ItemStack) -> bool {
@@ -238,10 +348,32 @@ impl View<'_> {
             Some(Source::Player(6)) => name.ends_with("_chestplate") || name == "minecraft:elytra",
             Some(Source::Player(7)) => name.ends_with("_leggings"),
             Some(Source::Player(8)) => name.ends_with("_boots"),
+            Some(Source::Grid(i)) => match (self.menu().kind, i) {
+                (Kind::Enchanting, 1) => name == "minecraft:lapis_lazuli",
+                (Kind::Grindstone, _) => {
+                    crate::stack::damageable(self.data, stack)
+                        || !crate::stack::enchantments(self.data, stack).is_empty()
+                        || !crate::stack::enchantments_in(
+                            self.data,
+                            stack,
+                            "minecraft:stored_enchantments",
+                        )
+                        .is_empty()
+                }
+                _ => true,
+            },
             Some(Source::Container(pos, i)) => {
                 let Some(entity) = self.world.block_entity(pos) else {
                     return false;
                 };
+                if entity.brewing.is_some() {
+                    // `PotionSlot`, `IngredientsSlot`, `FuelSlot`.
+                    return match i {
+                        0..=2 => super::brewing::is_potion_input(self.data, stack),
+                        3 => super::brewing::is_reagent(self.data, stack),
+                        _ => super::brewing::is_fuel(self.data, stack),
+                    };
+                }
                 if entity.furnace.is_some() {
                     // `FurnaceResultSlot` takes nothing, `FurnaceFuelSlot`
                     // fuel and one empty bucket.
@@ -264,12 +396,31 @@ impl View<'_> {
     }
 
     fn max(&self, stack: &ItemStack) -> i32 {
-        self.data.item(stack.item).map_or(64, |i| i.stack.max(1))
+        crate::stack::max_stack_size(self.data, stack)
     }
 
-    /// What the grid crafts right now.
+    /// `Slot.getMaxStackSize`: a bottle place and the enchanting slot hold
+    /// one.
+    fn slot_max(&self, slot: usize, stack: &ItemStack) -> i32 {
+        let one = match self.source(slot) {
+            Some(Source::Container(pos, 0..=2)) => self
+                .world
+                .block_entity(pos)
+                .is_some_and(|e| e.brewing.is_some()),
+            Some(Source::Grid(0)) => self.menu().kind == Kind::Enchanting,
+            _ => false,
+        };
+        if one { 1 } else { self.max(stack) }
+    }
+
+    /// What the grid crafts right now, or the workstation offers.
     fn result(&self) -> Option<ItemStack> {
         let menu = self.menu();
+        match &menu.extra {
+            Extra::Anvil { result, .. } => return result.result.clone(),
+            Extra::Grindstone(result) => return result.clone(),
+            _ => {}
+        }
         let size = menu.grid_size();
         if size == 0 {
             return None;
@@ -288,9 +439,47 @@ impl View<'_> {
     }
 
     /// Takes the result: one of each ingredient is used up, containers like
-    /// buckets stay behind (`ResultSlot.onTake`).
+    /// buckets stay behind (`ResultSlot.onTake`). An anvil wants its levels
+    /// first and uses up what it took; a grindstone takes both inputs.
     fn craft(&mut self) -> Option<ItemStack> {
         let result = self.result()?;
+        let creative = self.player.game_mode() == GameMode::Creative;
+        let level = self.player.experience.level;
+        let data = self.data;
+        let menu = self.menu_mut();
+        match &menu.extra {
+            Extra::Anvil { result: anvil, .. } => {
+                // `AnvilMenu.mayPickup` and `onTake`.
+                if anvil.cost <= 0 || (!creative && level < anvil.cost) {
+                    return None;
+                }
+                let (cost, repair_count, only_renaming) =
+                    (anvil.cost, anvil.repair_count, anvil.only_renaming);
+                if repair_count > 0 {
+                    menu.grid[1] = menu.grid[1].take().and_then(|mut a| {
+                        a.count -= repair_count;
+                        (a.count > 0).then_some(a)
+                    });
+                } else if !only_renaming {
+                    menu.grid[1] = None;
+                }
+                menu.grid[0] = None;
+                if let Extra::Anvil { result, .. } = &mut menu.extra {
+                    *result = Default::default();
+                }
+                menu.taken = Some(Taken::Anvil { cost });
+                return Some(result);
+            }
+            Extra::Grindstone(_) => {
+                let experience = super::enchanting::grind_experience(data, menu.grid[0].as_ref())
+                    + super::enchanting::grind_experience(data, menu.grid[1].as_ref());
+                menu.grid = vec![None, None];
+                menu.extra = Extra::Grindstone(None);
+                menu.taken = Some(Taken::Grindstone { experience });
+                return Some(result);
+            }
+            _ => {}
+        }
         let data = self.data;
         let mut leftovers = Vec::new();
         let grid = &mut self.menu_mut().grid;
@@ -330,6 +519,9 @@ impl View<'_> {
         if self.source(slot)? == Source::Result {
             return self.craft();
         }
+        if !self.may_pickup(slot) {
+            return None;
+        }
         let mut stack = self.get(slot)?;
         let taken = count.min(stack.count);
         stack.count -= taken;
@@ -346,7 +538,7 @@ impl View<'_> {
         if !self.allows(slot, &carried) {
             return Some(carried);
         }
-        let max = self.max(&carried);
+        let max = self.slot_max(slot, &carried);
         let existing = self.get(slot);
         let room = match &existing {
             None => max,
@@ -368,8 +560,8 @@ impl View<'_> {
     /// `moveItemStackTo`: first onto matching stacks, then into empty slots,
     /// in the slot order given.
     fn move_to(&mut self, mut stack: ItemStack, targets: &[usize]) -> Option<ItemStack> {
-        let max = self.max(&stack);
         for &target in targets {
+            let max = self.slot_max(target, &stack);
             if let Some(existing) = self.get(target)
                 && same(&existing, &stack)
                 && existing.count < max
@@ -390,6 +582,18 @@ impl View<'_> {
         }
         for &target in targets {
             if self.get(target).is_none() && self.allows(target, &stack) {
+                let max = self.slot_max(target, &stack);
+                if stack.count > max {
+                    self.set(
+                        target,
+                        Some(ItemStack {
+                            count: max,
+                            ..stack.clone()
+                        }),
+                    );
+                    stack.count -= max;
+                    continue;
+                }
                 self.set(target, Some(stack));
                 return None;
             }
@@ -474,6 +678,15 @@ impl Game {
                 .map(|e| e.items[2].as_ref().map_or(0, |s| s.count))
         });
         self.click_slots(entity_id, slot, button, input, mode, &mut drops);
+        let taken = self
+            .players
+            .get_mut(&entity_id)
+            .and_then(|p| p.menu.as_mut())
+            .and_then(|m| m.taken.take());
+        if let Some(taken) = taken {
+            self.workstation_taken(entity_id, taken);
+        }
+        self.refresh_workstation(entity_id);
         if let (Some(pos), Some(before)) = (furnace, result_before) {
             let after = self
                 .context
@@ -647,6 +860,7 @@ impl Game {
             menu: menu_type,
             title: text::translate(title, Vec::new(), None),
         }))));
+        self.refresh_workstation(entity_id);
         self.send_menu(entity_id);
         for pos in watched {
             self.update_openers(pos);
@@ -850,6 +1064,7 @@ fn pickup(s: &mut View, index: usize, primary: bool) {
             };
             s.take(index, amount)
         }
+        (Some(_), Some(carried)) if !s.may_pickup(index) => Some(carried),
         (Some(clicked), Some(mut carried)) => {
             if s.source(index) == Some(Source::Result) {
                 // Only a whole result that fits onto what is in hand.
@@ -956,7 +1171,7 @@ fn drag(s: &mut View, slot: i16, button: i8, mode: GameMode) {
 /// `SWAP`: the number keys and F swap a slot with a hotbar slot or the off
 /// hand.
 fn swap(s: &mut View, index: usize, hotbar: usize) {
-    if s.source(index) == Some(Source::Player(hotbar)) {
+    if s.source(index) == Some(Source::Player(hotbar)) || !s.may_pickup(index) {
         return;
     }
     let source = s.player.inventory.get(hotbar).cloned();
@@ -1022,6 +1237,9 @@ fn pickup_all(s: &mut View, index: usize, forward: bool) {
 /// `quickMoveStack` of each screen: shift-click moves a stack between the
 /// container (or grid) and the inventory.
 fn quick_move(s: &mut View, index: usize) -> Option<ItemStack> {
+    if !s.may_pickup(index) {
+        return None;
+    }
     let stack = s.get(index)?;
     let kind = s.menu().kind;
     let count = s.menu().slots.len();
@@ -1061,6 +1279,72 @@ fn quick_move(s: &mut View, index: usize) -> Option<ItemStack> {
             _ if s.data.item(stack.item).is_some_and(|i| i.fuel.is_some()) => range(1, 2, false),
             3..=29 => range(30, 39, false),
             _ => range(3, 30, false),
+        },
+        // `BrewingStandMenu.quickMoveStack`.
+        Kind::Brewing => match index {
+            0..=4 => range(5, 41, true),
+            _ if super::brewing::is_fuel(s.data, &stack) => {
+                let mut targets = vec![4];
+                if super::brewing::is_reagent(s.data, &stack) {
+                    targets.push(3);
+                }
+                targets
+            }
+            _ if super::brewing::is_reagent(s.data, &stack) => vec![3],
+            _ if super::brewing::is_potion_input(s.data, &stack) => range(0, 3, false),
+            5..=31 => range(32, 41, false),
+            _ => range(5, 32, false),
+        },
+        // `EnchantmentMenu.quickMoveStack`: lapis to its place, anything
+        // else one at a time onto the table.
+        Kind::Enchanting => match index {
+            0 | 1 => range(2, 38, true),
+            _ if s.data.item(stack.item).map(|i| i.name.as_str())
+                == Some("minecraft:lapis_lazuli") =>
+            {
+                range(1, 2, true)
+            }
+            _ => {
+                if s.get(0).is_some() || !s.allows(0, &stack) {
+                    return None;
+                }
+                let mut rest = stack.clone();
+                rest.count -= 1;
+                s.set(
+                    0,
+                    Some(ItemStack {
+                        count: 1,
+                        ..stack.clone()
+                    }),
+                );
+                s.set(index, (rest.count > 0).then_some(rest));
+                return Some(ItemStack { count: 1, ..stack });
+            }
+        },
+        // `ItemCombinerMenu.quickMoveStack` and the grindstone's own.
+        Kind::Anvil => match index {
+            2 => range(3, 39, true),
+            0 | 1 => range(3, 39, false),
+            _ => range(0, 2, false)
+                .into_iter()
+                .chain(if index < 30 {
+                    range(30, 39, false)
+                } else {
+                    range(3, 30, false)
+                })
+                .collect(),
+        },
+        Kind::Grindstone => match index {
+            2 => range(3, 39, true),
+            0 | 1 => range(3, 39, false),
+            _ if s.get(0).is_some() && s.get(1).is_some() => {
+                if index < 30 {
+                    range(30, 39, false)
+                } else {
+                    range(3, 30, false)
+                }
+            }
+            _ => range(0, 2, false),
         },
     };
     if s.source(index) == Some(Source::Result) {

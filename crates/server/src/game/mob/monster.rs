@@ -285,10 +285,12 @@ impl Game {
     /// `Mob.doHurtTarget`: the mob's attack damage, knocking the player
     /// back.
     fn mob_attack(&mut self, entity_id: i32, target: i32) {
+        let damage =
+            self.attribute(super::Living::Mob(entity_id), "minecraft:attack_damage") as f32;
         let Some(mob) = self.mobs.get(&entity_id) else {
             return;
         };
-        let (damage, at) = (mob.attack_damage, mob.pos);
+        let at = mob.pos;
         let name = self.mob_name(entity_id);
         let Some(player) = self.players.get(&target) else {
             return;
@@ -301,7 +303,7 @@ impl Game {
                 .collect(),
             None,
         );
-        self.hurt_player(
+        let hurt = self.hurt_player(
             target,
             Hit {
                 amount: damage,
@@ -312,6 +314,15 @@ impl Game {
                 message,
             },
         );
+        // Thorns on the player's armor.
+        if hurt {
+            self.post_attack(
+                super::Living::Player(target),
+                Some(entity_id),
+                Some(entity_id),
+                "minecraft:mob_attack",
+            );
+        }
     }
 
     /// `RangedBowAttackGoal`: closer until in range and seen for a second,
@@ -410,6 +421,18 @@ impl Game {
             1.0,
             1.0 / (rng.random::<f32>() * 0.4 + 0.8),
         );
+        let Some(item) = self.context.data.item_id("minecraft:arrow") else {
+            return;
+        };
+        let weapon = self
+            .mobs
+            .get(&entity_id)
+            .and_then(|m| {
+                m.equipment().iter().find(|(slot, _)| {
+                    *slot == ferrocraft_protocol::packets::play::equipment_slot::MAIN_HAND
+                })
+            })
+            .map(|(_, stack)| stack.clone());
         self.shoot_arrow(Shot {
             owner: Some(entity_id),
             from,
@@ -419,6 +442,8 @@ impl Game {
             base_damage,
             crit: false,
             pickup: Pickup::Disallowed,
+            item: crate::stack::plain(item, 1),
+            weapon,
         });
     }
 
@@ -482,7 +507,7 @@ impl Game {
                 source: Some(entity_id),
                 attacker: Some(entity_id),
                 breaks_blocks: self.rules.flag("mob_griefing"),
-                decay: true,
+                decay: self.rules.flag("mob_explosion_drop_decay"),
             });
             self.remove_mob(entity_id);
         }

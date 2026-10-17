@@ -2,7 +2,8 @@
 //! items between: every eight ticks a hopper passes one item on to the
 //! container it points into and takes one from the container above, or
 //! picks up items lying on it. Furnaces take ingredients from above and
-//! fuel from the sides and give their results downwards
+//! fuel from the sides and give their results downwards; brewing stands
+//! take reagents from above and bottles and fuel from the sides
 //! (`WorldlyContainer`). A powered hopper rests.
 
 use ferrocraft_protocol::codec::BlockPos;
@@ -23,14 +24,22 @@ const CONTAINER_MAX: i32 = 99;
 #[derive(Debug, Clone)]
 pub struct Container {
     slots: Vec<(BlockPos, usize)>,
-    /// A furnace, smoker or blast furnace, which offers its slots by side.
-    furnace: bool,
+    /// A furnace, smoker, blast furnace or brewing stand, which offers its
+    /// slots by side.
+    sided: Sided,
     /// A hopper: where it is, for its cooldown.
     hopper: Option<BlockPos>,
     /// Shulker boxes take no shulker boxes.
     shulker: bool,
     /// The block entities, to tell comparators of a change.
     positions: Vec<BlockPos>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sided {
+    No,
+    Furnace,
+    Brewing,
 }
 
 fn same(a: &ItemStack, b: &ItemStack) -> bool {
@@ -88,11 +97,10 @@ impl Game {
     }
 
     /// `HopperBlockEntity.getContainerAt`: the container block at `pos`.
-    /// Brewing stands are left out; Ferrocraft does not brew yet.
     pub(super) fn container_at(&self, pos: BlockPos) -> Option<Container> {
         let entity = self.context.world.block_entity(pos)?;
         let kind = entity.kind.as_str();
-        if container_size(kind) == 0 || kind == "minecraft:brewing_stand" {
+        if container_size(kind) == 0 {
             return None;
         }
         let positions = if kind.ends_with("chest") {
@@ -106,7 +114,13 @@ impl Game {
                 .iter()
                 .flat_map(|&p| (0..size).map(move |i| (p, i)))
                 .collect(),
-            furnace: entity.furnace.is_some(),
+            sided: if entity.furnace.is_some() {
+                Sided::Furnace
+            } else if entity.brewing.is_some() {
+                Sided::Brewing
+            } else {
+                Sided::No
+            },
             hopper: (kind == "minecraft:hopper").then_some(pos),
             shulker: kind == "minecraft:shulker_box",
             positions,
@@ -137,10 +151,13 @@ impl Game {
     /// `getSlots`: which slots a side offers (`getSlotsForFace` of a
     /// furnace), all of them for other containers.
     fn slots_for(&self, container: &Container, side: Option<Direction>) -> Vec<usize> {
-        match (container.furnace, side) {
-            (true, Some(Direction::Down)) => vec![2, 1],
-            (true, Some(Direction::Up)) => vec![0],
-            (true, Some(_)) => vec![1],
+        match (container.sided, side) {
+            (Sided::Furnace, Some(Direction::Down)) => vec![2, 1],
+            (Sided::Furnace, Some(Direction::Up)) => vec![0],
+            (Sided::Furnace, Some(_)) => vec![1],
+            (Sided::Brewing, Some(Direction::Up)) => vec![3],
+            (Sided::Brewing, Some(Direction::Down)) => vec![0, 1, 2, 3],
+            (Sided::Brewing, Some(_)) => vec![0, 1, 2, 4],
             _ => (0..container.slots.len()).collect(),
         }
     }
@@ -152,7 +169,18 @@ impl Game {
         if container.shulker && name.ends_with("shulker_box") {
             return false;
         }
-        if !container.furnace {
+        if container.sided == Sided::Brewing {
+            // `BrewingStandBlockEntity.canPlaceItem`.
+            return match index {
+                4 => super::brewing::is_fuel(data, stack),
+                3 => super::brewing::is_reagent(data, stack),
+                _ => {
+                    super::brewing::is_potion_input(data, stack)
+                        && self.slot(container, index).is_none()
+                }
+            };
+        }
+        if container.sided != Sided::Furnace {
             return true;
         }
         match index {
@@ -178,7 +206,12 @@ impl Game {
         stack: &ItemStack,
         side: Direction,
     ) -> bool {
-        if container.furnace && side == Direction::Down && index == 1 {
+        if container.sided == Sided::Brewing && index == 3 {
+            // Only an empty bottle leaves by the reagent's place.
+            return self.context.data.item(stack.item).map(|i| i.name.as_str())
+                == Some("minecraft:glass_bottle");
+        }
+        if container.sided == Sided::Furnace && side == Direction::Down && index == 1 {
             return self
                 .context
                 .data
@@ -201,7 +234,7 @@ impl Game {
         mut stack: ItemStack,
         side: Option<Direction>,
     ) -> Option<ItemStack> {
-        let slots = if into.furnace && side.is_some() {
+        let slots = if into.sided != Sided::No && side.is_some() {
             self.slots_for(into, side)
         } else {
             (0..into.slots.len()).collect()

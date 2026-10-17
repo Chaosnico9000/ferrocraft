@@ -934,7 +934,7 @@ impl Game {
             Kind::Dispenser | Kind::Dropper => self.dispenser_neighbor_changed(pos, state),
             Kind::Door => self.door_neighbor_changed(pos, state, source),
             Kind::Trapdoor | Kind::FenceGate => self.opening_neighbor_changed(pos, state),
-            Kind::Tnt if self.has_neighbor_signal(pos) => {
+            Kind::Tnt if self.has_neighbor_signal(pos) && self.rules.flag("tnt_explodes") => {
                 self.set_block(pos, self.air);
                 self.prime_tnt(pos, None, super::tnt::DEFAULT_FUSE);
             }
@@ -959,7 +959,11 @@ impl Game {
             Kind::Observer if !same_block => self.observer_on_place(pos, state),
             Kind::Hopper if !same_block => self.hopper_check_powered(pos, state),
             Kind::Fire => self.fire_on_place(pos, state, !same_block),
-            Kind::Tnt if !same_block && self.has_neighbor_signal(pos) => {
+            Kind::Tnt
+                if !same_block
+                    && self.has_neighbor_signal(pos)
+                    && self.rules.flag("tnt_explodes") =>
+            {
                 self.set_block(pos, self.air);
                 self.prime_tnt(pos, None, super::tnt::DEFAULT_FUSE);
             }

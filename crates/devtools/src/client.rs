@@ -44,8 +44,21 @@ pub struct Configured {
     pub tags: UpdateTags,
 }
 
+/// The ids of 26.3, for reading item components.
+const IDS: &str = include_str!("../../../data/26.3/ids.json");
+
 impl Client {
     pub async fn connect(addr: SocketAddr, intent: Intent, protocol_version: i32) -> Self {
+        if let Ok(ids) = serde_json::from_str::<serde_json::Value>(IDS)
+            && let Some(names) = ids["data_component_type"].as_array()
+        {
+            ferrocraft_protocol::component::set_type_names(
+                names
+                    .iter()
+                    .filter_map(|n| n.as_str().map(str::to_owned))
+                    .collect(),
+            );
+        }
         let mut client = Self {
             stream: TcpStream::connect(addr).await.unwrap(),
             buf: Vec::new(),

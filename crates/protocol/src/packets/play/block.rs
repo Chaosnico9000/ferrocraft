@@ -228,21 +228,35 @@ packet! {
 }
 
 impl Decode for Slot {
-    /// Only for stacks without components: plain component values cannot be
-    /// read without knowing their type.
+    /// Component values carry no length here: only components with a shape
+    /// in [`crate::component`] can be read, once the type names are known
+    /// ([`crate::component::set_type_names`]).
     fn decode(buf: &mut &[u8]) -> Result<Self> {
         let count = VarInt::decode(buf)?.0;
         if count <= 0 {
             return Ok(Self(None));
         }
         let item = VarInt::decode(buf)?.0;
-        if (VarInt::decode(buf)?.0, VarInt::decode(buf)?.0) != (0, 0) {
-            return Err(Error::Invalid("cannot read item components"));
+        let added_count = decode_count(buf, MAX_COMPONENTS)?;
+        let removed_count = decode_count(buf, MAX_COMPONENTS)?;
+        let mut added = Vec::with_capacity(added_count);
+        for _ in 0..added_count {
+            let kind = VarInt::decode(buf)?.0;
+            let shape = crate::component::type_name(kind)
+                .and_then(crate::component::component)
+                .ok_or(Error::Invalid("cannot read this item component"))?;
+            let start = *buf;
+            shape.shape.skip(buf)?;
+            let used = start.len() - buf.len();
+            added.push((kind, start[..used].to_vec()));
         }
+        let removed = (0..removed_count)
+            .map(|_| Ok(VarInt::decode(buf)?.0))
+            .collect::<Result<_>>()?;
         Ok(Self(Some(ItemStack {
             item,
             count,
-            patch: ComponentPatch::default(),
+            patch: ComponentPatch { added, removed },
         })))
     }
 }

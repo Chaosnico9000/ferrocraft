@@ -60,9 +60,13 @@ enum Predicate {
     AllOf { terms: Vec<Condition> },
     #[serde(rename = "minecraft:inverted")]
     Inverted { term: Condition },
-    /// The chance by enchantment level, here always level 0.
+    /// The chance by the tool's level of an enchantment (fortune).
     #[serde(rename = "minecraft:table_bonus")]
-    TableBonus { chances: Vec<f32> },
+    TableBonus {
+        #[serde(default)]
+        enchantment: String,
+        chances: Vec<f32>,
+    },
     #[serde(rename = "minecraft:random_chance")]
     RandomChance { chance: f32 },
     #[serde(rename = "minecraft:match_tool")]
@@ -89,9 +93,15 @@ enum Predicate {
     },
     #[serde(rename = "minecraft:killed_by_player")]
     KilledByPlayer,
-    /// A chance that looting would raise, here always the plain one.
+    /// A chance that looting raises.
     #[serde(rename = "minecraft:random_chance_with_enchanted_bonus")]
-    RandomChanceWithEnchantedBonus { unenchanted_chance: f32 },
+    RandomChanceWithEnchantedBonus {
+        unenchanted_chance: f32,
+        #[serde(default)]
+        enchanted_chance: Value,
+        #[serde(default)]
+        enchantment: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -113,7 +123,7 @@ struct LocationPredicate {
 struct ToolPredicate {
     /// An item, items or `#tag`.
     items: Option<OneOrMany<String>>,
-    /// Component predicates such as enchantments, which no item has here.
+    /// Component predicates such as `minecraft:enchantments`.
     predicates: Option<Value>,
 }
 
@@ -167,6 +177,22 @@ impl Number {
     }
 }
 
+/// `LevelBasedValue` of a loot condition.
+fn crate_level_value(value: &Value, level: i32) -> f32 {
+    match value {
+        Value::Number(n) => n.as_f64().unwrap_or(0.0) as f32,
+        Value::Object(o) => {
+            let base = o.get("base").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+            let per = o
+                .get("per_level_above_first")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0) as f32;
+            base + per * (level - 1) as f32
+        }
+        _ => 0.0,
+    }
+}
+
 fn binomial(n: i32, p: f32, rng: &mut impl Rng) -> i32 {
     (0..n).filter(|_| rng.random::<f32>() < p).count() as i32
 }
@@ -183,12 +209,22 @@ enum Function {
     },
     #[serde(rename = "minecraft:limit_count")]
     LimitCount { limit: Limit },
-    /// Fortune's formulas; only the one with a base chance gives anything
-    /// at level 0.
+    /// Fortune's formulas, by the tool's level of the enchantment.
     #[serde(rename = "minecraft:apply_bonus")]
     ApplyBonus {
+        #[serde(default)]
+        enchantment: String,
         formula: String,
         parameters: Option<BonusParameters>,
+        condition: Option<Condition>,
+    },
+    /// Looting: more for each level (`EnchantedCountIncreaseFunction`).
+    #[serde(rename = "minecraft:enchanted_count_increase")]
+    EnchantedCountIncrease {
+        enchantment: String,
+        count: Number,
+        #[serde(default)]
+        limit: i32,
         condition: Option<Condition>,
     },
     /// Each item survives an explosion with a chance of one in its radius.
@@ -215,6 +251,8 @@ struct BonusParameters {
     extra: i32,
     #[serde(default)]
     probability: f32,
+    #[serde(default, rename = "bonusMultiplier")]
+    bonus_multiplier: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -369,8 +407,18 @@ impl Context<'_> {
                 .explosion
                 .is_none_or(|radius| rng.random::<f32>() <= 1.0 / radius),
             Predicate::KilledByPlayer => self.by_player,
-            Predicate::RandomChanceWithEnchantedBonus { unenchanted_chance } => {
-                rng.random::<f32>() < *unenchanted_chance
+            Predicate::RandomChanceWithEnchantedBonus {
+                unenchanted_chance,
+                enchanted_chance,
+                enchantment,
+            } => {
+                let level = self.level(enchantment);
+                let chance = if level > 0 {
+                    crate_level_value(enchanted_chance, level)
+                } else {
+                    *unenchanted_chance
+                };
+                rng.random::<f32>() < chance
             }
             Predicate::EntityProperties { entity, predicate } => {
                 self.entity_matches(entity, predicate)
@@ -379,9 +427,15 @@ impl Context<'_> {
             Predicate::AnyOf { terms } => terms.iter().any(|t| self.holds(t, rng)),
             Predicate::AllOf { terms } => terms.iter().all(|t| self.holds(t, rng)),
             Predicate::Inverted { term } => !self.holds(term, rng),
-            Predicate::TableBonus { chances } => chances
-                .first()
-                .is_some_and(|&chance| rng.random::<f32>() < chance),
+            Predicate::TableBonus {
+                enchantment,
+                chances,
+            } => {
+                let level = usize::try_from(self.level(enchantment)).unwrap_or(0);
+                chances
+                    .get(level.min(chances.len().saturating_sub(1)))
+                    .is_some_and(|&chance| rng.random::<f32>() < chance)
+            }
             Predicate::RandomChance { chance } => rng.random::<f32>() < *chance,
             Predicate::MatchTool { predicate } => self.tool_matches(predicate),
             Predicate::LocationCheck {
@@ -470,11 +524,64 @@ impl Context<'_> {
         })
     }
 
+    /// The tool's level of an enchantment, 0 without one.
+    fn level(&self, enchantment: &str) -> i32 {
+        if enchantment.is_empty() {
+            return 0;
+        }
+        self.tool.map_or(0, |tool| {
+            crate::stack::enchantment_level(self.data, tool, enchantment)
+        })
+    }
+
+    /// `DataComponentPredicate`s of an item: `minecraft:enchantments` and
+    /// `minecraft:stored_enchantments`, each a list that must all be met.
+    fn component_predicates(&self, tool: &ItemStack, predicates: &Value) -> bool {
+        let Some(checks) = predicates.as_object() else {
+            return true;
+        };
+        checks.iter().all(|(key, wanted)| match key.as_str() {
+            "minecraft:enchantments" | "minecraft:stored_enchantments" => {
+                let present = crate::stack::enchantments_in(self.data, tool, key);
+                wanted.as_array().into_iter().flatten().all(|want| {
+                    present.iter().any(|(name, level)| {
+                        let named = match &want["enchantments"] {
+                            Value::String(s) => match s.strip_prefix('#') {
+                                Some(tag) => self
+                                    .data
+                                    .registry_id("minecraft:enchantment", name)
+                                    .is_ok_and(|id| {
+                                        self.data.tag_contains("minecraft:enchantment", tag, id)
+                                    }),
+                                None => s == name,
+                            },
+                            Value::Array(list) => list.iter().any(|s| s == name.as_str()),
+                            _ => true,
+                        };
+                        let leveled = match &want["levels"] {
+                            Value::Number(n) => n.as_i64() == Some(i64::from(*level)),
+                            Value::Object(range) => {
+                                let bound = |key: &str| range.get(key).and_then(Value::as_i64);
+                                bound("min").is_none_or(|m| i64::from(*level) >= m)
+                                    && bound("max").is_none_or(|m| i64::from(*level) <= m)
+                            }
+                            _ => true,
+                        };
+                        named && leveled
+                    })
+                })
+            }
+            _ => false,
+        })
+    }
+
     fn tool_matches(&self, predicate: &ToolPredicate) -> bool {
         let Some(tool) = self.tool.filter(|t| t.count > 0) else {
             return false;
         };
-        if predicate.predicates.is_some() {
+        if let Some(predicates) = &predicate.predicates
+            && !self.component_predicates(tool, predicates)
+        {
             return false;
         }
         predicate.items.as_ref().is_none_or(|items| {
@@ -534,15 +641,50 @@ impl Context<'_> {
                     }
                 }
                 Function::ApplyBonus {
+                    enchantment,
                     formula,
                     parameters,
                     condition,
                 } => {
-                    if formula == "minecraft:binomial_with_bonus_count"
-                        && let Some(p) = parameters
-                        && self.test(condition.as_ref(), rng)
-                    {
-                        *count += binomial(p.extra, p.probability, rng);
+                    if !self.test(condition.as_ref(), rng) {
+                        continue;
+                    }
+                    let level = self.level(enchantment);
+                    match formula.as_str() {
+                        // `ApplyBonusCount.BinomialWithBonusCount`.
+                        "minecraft:binomial_with_bonus_count" => {
+                            if let Some(p) = parameters {
+                                *count += binomial(level + p.extra, p.probability, rng);
+                            }
+                        }
+                        // `OreDrops`: up to `level + 1` times as much.
+                        "minecraft:ore_drops" => {
+                            if level > 0 {
+                                let bonus = (rng.random_range(0..level + 2) - 1).max(0);
+                                *count *= bonus + 1;
+                            }
+                        }
+                        // `UniformBonusCount`.
+                        "minecraft:uniform_bonus_count" => {
+                            let multiplier = parameters.as_ref().map_or(1, |p| p.bonus_multiplier);
+                            *count += rng.random_range(0..=(multiplier * level).max(0));
+                        }
+                        _ => {}
+                    }
+                }
+                Function::EnchantedCountIncrease {
+                    enchantment,
+                    count: per_level,
+                    limit,
+                    condition,
+                } => {
+                    let level = self.level(enchantment);
+                    if level > 0 && self.test(condition.as_ref(), rng) {
+                        let bonus = level as f32 * per_level.float(rng);
+                        *count += bonus.round() as i32;
+                        if *limit > 0 {
+                            *count = (*count).min(*limit);
+                        }
                     }
                 }
                 Function::Ignored => {}

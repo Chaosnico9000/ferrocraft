@@ -314,6 +314,7 @@ impl Game {
             // to a second and a half.
             if block.name == "minecraft:tnt" {
                 self.remove_block(pos, None, false);
+                // Without `tnt_explodes` it just goes, without a drop.
                 let fuse = rand::rng().random_range(0..80 / 4) + 80 / 8;
                 self.prime_tnt(pos, attacker, fuse);
                 continue;

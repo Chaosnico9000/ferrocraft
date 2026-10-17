@@ -201,8 +201,10 @@ packet! {
     }
 }
 
-/// `ClientboundAnimatePacket.CRITICAL_HIT`.
+/// `ClientboundAnimatePacket.CRITICAL_HIT` and `MAGIC_CRITICAL_HIT` (the
+/// sparks of an enchanted weapon).
 pub const ANIMATE_CRITICAL_HIT: u8 = 1;
+pub const ANIMATE_MAGIC_CRITICAL_HIT: u8 = 2;
 /// `SoundSource.NEUTRAL` and `SoundSource.PLAYERS`.
 pub const SOUND_SOURCE_NEUTRAL: i32 = 6;
 pub const SOUND_SOURCE_PLAYERS: i32 = 7;
